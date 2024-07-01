@@ -517,13 +517,13 @@ def filter_internet_gateways(
 
 def is_filter_matching(obj: Any, _filter: str, filter_value: Any) -> bool:
     value = obj.get_filter_value(_filter)
-
     if filter_value is None:
         return False
 
     if isinstance(value, str):
         if not isinstance(filter_value, list):
             filter_value = [filter_value]
+
         if any(fnmatch.fnmatch(value, pattern) for pattern in filter_value):
             return True
         return False
@@ -534,6 +534,9 @@ def is_filter_matching(obj: Any, _filter: str, filter_value: Any) -> bool:
 
     try:
         value = set(value)
+        if isinstance(filter_value, list) and len(filter_value) == 1:
+            return any(fnmatch.fnmatch(element, filter_value[0]) for element in value)
+
         return (value and value.issubset(filter_value)) or value.issuperset(
             filter_value
         )
@@ -569,11 +572,17 @@ def random_ed25519_key_pair() -> Dict[str, str]:
         format=serialization.PrivateFormat.OpenSSH,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    fingerprint = public_key_fingerprint(private_key.public_key())
+    public_key = private_key.public_key()
+    public_key_material = public_key.public_bytes(
+        encoding=serialization.Encoding.OpenSSH,
+        format=serialization.PublicFormat.OpenSSH,
+    )
+    fingerprint = public_key_fingerprint(public_key)
 
     return {
         "fingerprint": fingerprint,
         "material": private_key_material.decode("ascii"),
+        "material_public": public_key_material.decode("ascii"),
     }
 
 
@@ -586,11 +595,17 @@ def random_rsa_key_pair() -> Dict[str, str]:
         format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    fingerprint = public_key_fingerprint(private_key.public_key())
+    public_key = private_key.public_key()
+    public_key_material = public_key.public_bytes(
+        encoding=serialization.Encoding.OpenSSH,
+        format=serialization.PublicFormat.OpenSSH,
+    )
+    fingerprint = public_key_fingerprint(public_key)
 
     return {
         "fingerprint": fingerprint,
         "material": private_key_material.decode("ascii"),
+        "material_public": public_key_material.decode("ascii"),
     }
 
 
@@ -774,21 +789,23 @@ def filter_iam_instance_profile_associations(
 
 def filter_iam_instance_profiles(
     account_id: str,
+    partition: str,
     iam_instance_profile_arn: Optional[str],
     iam_instance_profile_name: Optional[str],
 ) -> Any:
     instance_profile = None
     instance_profile_by_name = None
     instance_profile_by_arn = None
+    backend = iam_backends[account_id][partition]
     if iam_instance_profile_name:
-        instance_profile_by_name = iam_backends[account_id][
-            "global"
-        ].get_instance_profile(iam_instance_profile_name)
+        instance_profile_by_name = backend.get_instance_profile(
+            iam_instance_profile_name
+        )
         instance_profile = instance_profile_by_name
     if iam_instance_profile_arn:
-        instance_profile_by_arn = iam_backends[account_id][
-            "global"
-        ].get_instance_profile_by_arn(iam_instance_profile_arn)
+        instance_profile_by_arn = backend.get_instance_profile_by_arn(
+            iam_instance_profile_arn
+        )
         instance_profile = instance_profile_by_arn
     # We would prefer instance profile that we found by arn
     if iam_instance_profile_arn and iam_instance_profile_name:

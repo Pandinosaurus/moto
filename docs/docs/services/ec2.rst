@@ -366,6 +366,7 @@ ec2
 - [ ] describe_store_image_tasks
 - [X] describe_subnets
 - [X] describe_tags
+- [ ] describe_traffic_mirror_filter_rules
 - [ ] describe_traffic_mirror_filters
 - [ ] describe_traffic_mirror_sessions
 - [ ] describe_traffic_mirror_targets

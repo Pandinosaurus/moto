@@ -12,7 +12,7 @@ from moto.core.utils import pascal_to_camelcase, remap_nested_keys, unix_time
 from moto.ec2 import ec2_backends
 from moto.moto_api._internal import mock_random
 from moto.moto_api._internal.managed_state_model import ManagedState
-from moto.utilities.utils import get_partition
+from moto.utilities.utils import ARN_PARTITION_REGEX, get_partition
 
 from ..ec2.utils import random_private_ip
 from .exceptions import (
@@ -1673,7 +1673,7 @@ class EC2ContainerServiceBackend(BaseBackend):
             if cluster_service_pair in self.services:
                 result.append(self.services[cluster_service_pair])
             else:
-                if name_or_arn.startswith("arn:aws:ecs"):
+                if re.match(ARN_PARTITION_REGEX + ":ecs", name_or_arn):
                     missing_arn = name_or_arn
                 else:
                     missing_arn = f"arn:{get_partition(self.region_name)}:ecs:{self.region_name}:{self.account_id}:service/{name}"
@@ -1693,6 +1693,9 @@ class EC2ContainerServiceBackend(BaseBackend):
             for prop_name, prop_val in service_properties.items():
                 if prop_val is not None:
                     current_service.__setattr__(prop_name, prop_val)
+                    if prop_name == "desired_count":
+                        current_service.__setattr__("running_count", prop_val)
+                        current_service.__setattr__("pending_count", 0)
             if task_definition_str:
                 self.describe_task_definition(task_definition_str)
                 current_service.task_definition = task_definition_str
@@ -2040,9 +2043,12 @@ class EC2ContainerServiceBackend(BaseBackend):
     @staticmethod
     def _parse_resource_arn(resource_arn: str) -> Dict[str, str]:
         regexes = [
-            "^arn:aws:ecs:(?P<region>[^:]+):(?P<account_id>[^:]+):(?P<service>[^:]+)/(?P<cluster_id>[^:]+)/(?P<service_id>[^:]+)/ecs-svc/(?P<id>.*)$",
-            "^arn:aws:ecs:(?P<region>[^:]+):(?P<account_id>[^:]+):(?P<service>[^:]+)/(?P<cluster_id>[^:]+)/(?P<id>.*)$",
-            "^arn:aws:ecs:(?P<region>[^:]+):(?P<account_id>[^:]+):(?P<service>[^:]+)/(?P<id>.*)$",
+            ARN_PARTITION_REGEX
+            + ":ecs:(?P<region>[^:]+):(?P<account_id>[^:]+):(?P<service>[^:]+)/(?P<cluster_id>[^:]+)/(?P<service_id>[^:]+)/ecs-svc/(?P<id>.*)$",
+            ARN_PARTITION_REGEX
+            + ":ecs:(?P<region>[^:]+):(?P<account_id>[^:]+):(?P<service>[^:]+)/(?P<cluster_id>[^:]+)/(?P<id>.*)$",
+            ARN_PARTITION_REGEX
+            + ":ecs:(?P<region>[^:]+):(?P<account_id>[^:]+):(?P<service>[^:]+)/(?P<id>.*)$",
         ]
         for regex in regexes:
             match = re.match(regex, resource_arn)

@@ -1,6 +1,116 @@
 Moto Changelog
 ==============
 
+5.0.10
+-----
+Docker Digest for 5.0.10: _sha256:bfb9cd2a437fc7c754b3a6a66b7fb528ec1a53e0c683e8b75514bff81543cf55_
+
+    General:
+        * CloudFormation now supports cfn-lint v1, as well as v0
+
+    New Services:
+
+        * FSX:
+            * create_file_system()
+            * delete_file_system()
+            * describe_file_systems()
+            * tag_resource()
+            * untag_resource()
+
+        * OpenSearch Serverless:
+            * batch_get_collection()
+            * create_collection()
+            * create_security_policy()
+            * create_vpc_endpoint()
+            * delete_collection()
+            * get_security_policy()
+            * list_collections()
+            * list_security_policies()
+            * list_tags_for_resource()
+            * tag_resource()
+            * untag_resource()
+            * update_security_policy()
+
+        * Shield:
+            * create_protection()
+            * delete_protection()
+            * describe_protection()
+            * list_protections()
+            * list_tags_for_resource()
+            * tag_resource()
+            * untag_resource()
+
+    New Methods:
+        * Sagemaker:
+            * create_cluster()
+            * delete_cluster()
+            * describe_cluster()
+            * list_clusters()
+            * list_cluster_nodes()
+
+    Miscellaneous:
+        * CognitoIDP: admin_list_groups_by_user() now supports pagination
+        * DynamoDB: transact_write_items() now validates the number of SET expressions
+        * DynamoDB: update_item() now validates unused ExpressionAttributeValues
+        * DynamoDB: query() now supports pagination when querying Global Indexes
+        * EC2: describe_images() - feat: support filtering images by ExecutableUsers=['self']
+        * EC2: describe_route_tables() now supports the filter `route.transit-gateway-id`
+        * EC2: update_security_group_rule_descriptions_ingress() now supports updating multiple descriptions
+        * EKS: create_nodegroup() now supports the `taints`-parameter
+        * ELBv2: add_listener_certificates() now validates when adding too many certificates (> 25)
+        * ELBv2: describe_target_health() now handles unknown/deregistered/terminated instances better
+        * ResourceGroupsTaggingAPI: get_resources() now supports ResourceType=s3:bucket
+        * RDS: Clusters now have the `creating`-status on create, and `available` immediately after - in line with AWS
+        * SSM: get_parameter() now supports ARN's for the Name-parameter
+
+
+5.0.9
+-----
+Docker Digest for 5.0.9: _sha256:df61e4e76344017f6c82924a3dd1cdd4dcbac4095cf234c6d6fb0a0f800fbeff_
+
+    General:
+        * Fixed an InfiniteRecursion-bug when accessing S3-buckets that was introduced in 5.0.8
+
+    New Methods:
+        * SSO-Admin:
+            * list_accounts_for_provisioned_permission_set()
+            * list_instances()
+            * list_permission_sets_provisioned_to_account()
+            * provision_permission_set()
+            * update_instance()
+
+    Miscellaneous:
+        * DynamoDB: query() now handles pagination correctly on a GSI without a range key
+        * IAM: create_policy() now returns tags correctly
+        * S3: list_objects(): The default value for MaxKeys can now be configured, using an environment variable:
+          MOTO_S3_DEFAULT_MAX_KEYS=1
+
+5.0.8
+-----
+Docker Digest for 5.0.8: _sha256:cfcd97074011bd563cdbeebac35ed710581a23cb2be07ab9b67aa00298fc3369_
+
+    General:
+        * Improved support for non-generic partitions (China, GovCloud, ISO-regions). 
+          All ARN's now contain the correct partition for resources created in those regions.
+
+    New Services:
+        * NetworkManager:
+            * create_global_network()
+            * describe_global_networks()
+            * create_core_network()
+            * create_global_network()
+            * delete_core_network()
+            * list_core_networks()
+            * get_core_network()
+            * tag_resource()
+            * untag_resource()
+
+    Miscellaneous:
+        * ResilienceHub: list_app_assessments() can now return pre-configured results
+        * ResourceGroupTagging: get_resources() now returns results when filtering on "lambda:function"
+        * S3: delete_object_tagging()/put_object_tagging() now send an EventBridge notification
+
+
 5.0.7
 -----
 Docker Digest for 5.0.7: _sha256:81ac52ff74b0bf0f4957ee4260e6a7e75d66c9e5d040ed4f721a5500b873c88a_

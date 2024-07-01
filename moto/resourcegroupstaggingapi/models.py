@@ -20,6 +20,7 @@ from moto.moto_api._internal import mock_random
 from moto.rds.models import RDSBackend, rds_backends
 from moto.redshift.models import RedshiftBackend, redshift_backends
 from moto.s3.models import S3Backend, s3_backends
+from moto.sagemaker.models import SageMakerModelBackend, sagemaker_backends
 from moto.sns.models import SNSBackend, sns_backends
 from moto.sqs.models import SQSBackend, sqs_backends
 from moto.ssm.models import SimpleSystemManagerBackend, ssm_backends
@@ -44,7 +45,7 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
 
     @property
     def s3_backend(self) -> S3Backend:
-        return s3_backends[self.account_id]["global"]
+        return s3_backends[self.account_id][self.partition]
 
     @property
     def ec2_backend(self) -> Any:  # type: ignore[misc]
@@ -129,6 +130,10 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
             return workspaces_backends[self.account_id][self.region_name]
         return None
 
+    @property
+    def sagemaker_backend(self) -> SageMakerModelBackend:
+        return sagemaker_backends[self.account_id][self.region_name]
+
     def _get_resources_generator(
         self,
         tag_filters: Optional[List[Dict[str, Any]]] = None,
@@ -206,14 +211,18 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
                 yield {"ResourceARN": f"{vault.backup_vault_arn}", "Tags": tags}
 
         # S3
-        if not resource_type_filters or "s3" in resource_type_filters:
+        if (
+            not resource_type_filters
+            or "s3" in resource_type_filters
+            or "s3:bucket" in resource_type_filters
+        ):
             for bucket in self.s3_backend.buckets.values():
                 tags = self.s3_backend.tagger.list_tags_for_resource(bucket.arn)["Tags"]
                 if not tags or not tag_filter(
                     tags
                 ):  # Skip if no tags, or invalid filter
                     continue
-                yield {"ResourceARN": "arn:aws:s3:::" + bucket.name, "Tags": tags}
+                yield {"ResourceARN": bucket.arn, "Tags": tags}
 
         # CloudFormation
         if not resource_type_filters or "cloudformation:stack" in resource_type_filters:
@@ -267,7 +276,7 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
                     # Skip if no tags, or invalid filter
                     continue
                 yield {
-                    "ResourceARN": f"arn:aws:ec2:{self.region_name}::image/{ami.id}",
+                    "ResourceARN": f"arn:{self.partition}:ec2:{self.region_name}::image/{ami.id}",
                     "Tags": tags,
                 }
 
@@ -285,7 +294,7 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
                         # Skip if no tags, or invalid filter
                         continue
                     yield {
-                        "ResourceARN": f"arn:aws:ec2:{self.region_name}::instance/{instance.id}",
+                        "ResourceARN": f"arn:{self.partition}:ec2:{self.region_name}::instance/{instance.id}",
                         "Tags": tags,
                     }
 
@@ -302,7 +311,7 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
                     # Skip if no tags, or invalid filter
                     continue
                 yield {
-                    "ResourceARN": f"arn:aws:ec2:{self.region_name}::network-interface/{eni.id}",
+                    "ResourceARN": f"arn:{self.partition}:ec2:{self.region_name}::network-interface/{eni.id}",
                     "Tags": tags,
                 }
 
@@ -322,7 +331,7 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
                         # Skip if no tags, or invalid filter
                         continue
                     yield {
-                        "ResourceARN": f"arn:aws:ec2:{self.region_name}::security-group/{sg.id}",
+                        "ResourceARN": f"arn:{self.partition}:ec2:{self.region_name}::security-group/{sg.id}",
                         "Tags": tags,
                     }
 
@@ -339,7 +348,7 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
                     # Skip if no tags, or invalid filter
                     continue
                 yield {
-                    "ResourceARN": f"arn:aws:ec2:{self.region_name}::snapshot/{snapshot.id}",
+                    "ResourceARN": f"arn:{self.partition}:ec2:{self.region_name}::snapshot/{snapshot.id}",
                     "Tags": tags,
                 }
 
@@ -359,7 +368,7 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
                 ):  # Skip if no tags, or invalid filter
                     continue
                 yield {
-                    "ResourceARN": f"arn:aws:ec2:{self.region_name}::volume/{volume.id}",
+                    "ResourceARN": f"arn:{self.partition}:ec2:{self.region_name}::volume/{volume.id}",
                     "Tags": tags,
                 }
 
@@ -601,7 +610,7 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
                 ):  # Skip if no tags, or invalid filter
                     continue
                 yield {
-                    "ResourceARN": f"arn:aws:ec2:{self.region_name}:{self.account_id}:vpc/{vpc.id}",
+                    "ResourceARN": f"arn:{self.partition}:ec2:{self.region_name}:{self.account_id}:vpc/{vpc.id}",
                     "Tags": tags,
                 }
         # VPC Customer Gateway
@@ -640,6 +649,21 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
                     continue
                 yield {
                     "ResourceARN": table.table_arn,
+                    "Tags": tags,
+                }
+
+        # sagemaker cluster
+        if (
+            not resource_type_filters
+            or "sagemaker" in resource_type_filters
+            or "sagemaker:cluster" in resource_type_filters
+        ):
+            for sagemaker_cluster in self.sagemaker_backend.clusters.values():
+                tags = self.sagemaker_backend.list_tags(sagemaker_cluster.arn)[0]
+                if not tags or not tag_filter(tags):
+                    continue
+                yield {
+                    "ResourceARN": sagemaker_cluster.arn,
                     "Tags": tags,
                 }
 
@@ -940,18 +964,20 @@ class ResourceGroupsTaggingAPIBackend(BaseBackend):
             "ErrorMessage": "Service not yet supported",
         }
         for arn in resource_arns:
-            if arn.startswith("arn:aws:rds:") or arn.startswith("arn:aws:snapshot:"):
+            if arn.startswith(
+                f"arn:{get_partition(self.region_name)}:rds:"
+            ) or arn.startswith(f"arn:{get_partition(self.region_name)}:snapshot:"):
                 self.rds_backend.add_tags_to_resource(
                     arn, TaggingService.convert_dict_to_tags_input(tags)
                 )
-            elif arn.startswith("arn:aws:workspaces:"):
+            elif arn.startswith(f"arn:{get_partition(self.region_name)}:workspaces:"):
                 resource_id = arn.split("/")[-1]
                 self.workspaces_backend.create_tags(  # type: ignore[union-attr]
                     resource_id, TaggingService.convert_dict_to_tags_input(tags)
                 )
-            elif arn.startswith("arn:aws:logs:"):
+            elif arn.startswith(f"arn:{get_partition(self.region_name)}:logs:"):
                 self.logs_backend.tag_resource(arn, tags)
-            elif arn.startswith("arn:aws:dynamodb"):
+            elif arn.startswith(f"arn:{get_partition(self.region_name)}:dynamodb"):
                 self.dynamodb_backend.tag_resource(
                     arn, TaggingService.convert_dict_to_tags_input(tags)
                 )

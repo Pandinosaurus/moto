@@ -38,7 +38,7 @@ from moto.core.utils import (
     utcfromtimestamp,
 )
 from moto.utilities.aws_headers import gen_amzn_requestid_long
-from moto.utilities.utils import load_resource, load_resource_as_bytes
+from moto.utilities.utils import get_partition, load_resource, load_resource_as_bytes
 
 log = logging.getLogger(__name__)
 
@@ -90,7 +90,10 @@ def _get_method_urls(service_name: str, region: str) -> Dict[str, Dict[str, str]
     for op_name in op_names:
         op_model = conn._service_model.operation_model(op_name)
         _method = op_model.http["method"]
-        uri_regexp = BaseResponse.uri_to_regexp(op_model.http["requestUri"])
+        request_uri = op_model.http["requestUri"]
+        if service_name == "route53" and request_uri.endswith("/rrset/"):
+            request_uri += "?"
+        uri_regexp = BaseResponse.uri_to_regexp(request_uri)
         method_urls[_method][uri_regexp] = op_model.name
 
     return method_urls
@@ -208,7 +211,7 @@ class ActionAuthenticatorMixin(object):
         self, bucket_name: Optional[str] = None, key_name: Optional[str] = None
     ) -> None:
         arn = f"{bucket_name or '*'}/{key_name}" if key_name else (bucket_name or "*")
-        resource = f"arn:aws:s3:::{arn}"
+        resource = f"arn:{get_partition(self.region)}:s3:::{arn}"  # type: ignore[attr-defined]
 
         from moto.iam.access_control import S3IAMRequest
 
@@ -423,6 +426,7 @@ class BaseResponse(_TemplateEnvironmentMixin, ActionAuthenticatorMixin):
         self.data = querystring
         self.method = request.method
         self.region = self.get_region_from_url(request, full_url)
+        self.partition = get_partition(self.region)
         self.uri_match: Optional[re.Match[str]] = None
 
         self.headers = request.headers
