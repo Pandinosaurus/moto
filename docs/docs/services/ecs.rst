@@ -16,37 +16,46 @@ ecs
 
 |start-h3| Implemented features for this service |end-h3|
 
+- [ ] continue_service_deployment
 - [X] create_capacity_provider
 - [X] create_cluster
+- [ ] create_daemon
+- [ ] create_express_gateway_service
 - [X] create_service
 - [X] create_task_set
 - [X] delete_account_setting
 - [X] delete_attributes
 - [X] delete_capacity_provider
 - [X] delete_cluster
+- [ ] delete_daemon
+- [ ] delete_daemon_task_definition
+- [ ] delete_express_gateway_service
 - [X] delete_service
-- [ ] delete_task_definitions
+- [X] delete_task_definitions
 - [X] delete_task_set
   
-        The Force-parameter is not yet implemented
-        
+The Force-parameter is not yet implemented
+
 
 - [X] deregister_container_instance
 - [X] deregister_task_definition
 - [X] describe_capacity_providers
 - [X] describe_clusters
-  
-        Only include=TAGS is currently supported.
-        
-
 - [X] describe_container_instances
+- [ ] describe_daemon
+- [ ] describe_daemon_deployments
+- [ ] describe_daemon_revisions
+- [ ] describe_daemon_task_definition
+- [ ] describe_express_gateway_service
+- [ ] describe_service_deployments
+- [ ] describe_service_revisions
 - [X] describe_services
 - [X] describe_task_definition
 - [X] describe_task_sets
 - [X] describe_tasks
   
-        Only include=TAGS is currently supported.
-        
+Only include=TAGS is currently supported.
+
 
 - [ ] discover_poll_endpoint
 - [ ] execute_command
@@ -54,15 +63,19 @@ ecs
 - [X] list_account_settings
 - [X] list_attributes
   
-        Pagination is not yet implemented
-        
+Pagination is not yet implemented
+
 
 - [X] list_clusters
   
-        maxSize and pagination not implemented
-        
+maxSize and pagination not implemented
+
 
 - [X] list_container_instances
+- [ ] list_daemon_deployments
+- [ ] list_daemon_task_definitions
+- [ ] list_daemons
+- [ ] list_service_deployments
 - [X] list_services
 - [ ] list_services_by_namespace
 - [X] list_tags_for_resource
@@ -70,8 +83,8 @@ ecs
 
 - [X] list_task_definition_families
   
-        The Status and pagination parameters are not yet implemented
-        
+The Status and pagination parameters are not yet implemented
+
 
 - [X] list_task_definitions
 - [X] list_tasks
@@ -80,9 +93,11 @@ ecs
 - [X] put_attributes
 - [X] put_cluster_capacity_providers
 - [X] register_container_instance
+- [ ] register_daemon_task_definition
 - [X] register_task_definition
 - [X] run_task
 - [X] start_task
+- [ ] stop_service_deployment
 - [X] stop_task
 - [ ] submit_attachment_state_changes
 - [ ] submit_container_state_change
@@ -92,12 +107,14 @@ ecs
 - [X] update_capacity_provider
 - [X] update_cluster
   
-        The serviceConnectDefaults-parameter is not yet implemented
-        
+The serviceConnectDefaults-parameter is not yet implemented
+
 
 - [ ] update_cluster_settings
 - [ ] update_container_agent
 - [X] update_container_instances_state
+- [ ] update_daemon
+- [ ] update_express_gateway_service
 - [X] update_service
 - [X] update_service_primary_task_set
   Updates task sets be PRIMARY or ACTIVE for given cluster:service task sets

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Final, Optional
+from typing import Final
 
 from moto.stepfunctions.parser.asl.component.common.comment import Comment
 from moto.stepfunctions.parser.asl.component.common.error_name.error_equals_decl import (
@@ -40,17 +40,17 @@ class RetrierDecl(EvalComponent):
     backoff_rate: Final[BackoffRateDecl]
     max_delay_seconds: Final[MaxDelaySecondsDecl]
     jitter_strategy: Final[JitterStrategyDecl]
-    comment: Final[Optional[Comment]]
+    comment: Final[Comment | None]
 
     def __init__(
         self,
         error_equals: ErrorEqualsDecl,
-        interval_seconds: Optional[IntervalSecondsDecl] = None,
-        max_attempts: Optional[MaxAttemptsDecl] = None,
-        backoff_rate: Optional[BackoffRateDecl] = None,
-        max_delay_seconds: Optional[MaxDelaySecondsDecl] = None,
-        jitter_strategy: Optional[JitterStrategyDecl] = None,
-        comment: Optional[Comment] = None,
+        interval_seconds: IntervalSecondsDecl | None = None,
+        max_attempts: MaxAttemptsDecl | None = None,
+        backoff_rate: BackoffRateDecl | None = None,
+        max_delay_seconds: MaxDelaySecondsDecl | None = None,
+        jitter_strategy: JitterStrategyDecl | None = None,
+        comment: Comment | None = None,
     ):
         self.error_equals = error_equals
         self.interval_seconds = interval_seconds or IntervalSecondsDecl()
@@ -59,9 +59,6 @@ class RetrierDecl(EvalComponent):
         self.max_delay_seconds = max_delay_seconds or MaxDelaySecondsDecl()
         self.jitter_strategy = jitter_strategy or JitterStrategyDecl()
         self.comment = comment
-
-        self._attempts_counter: int = 0
-        self._next_interval_seconds: float = self.interval_seconds.seconds
 
     @classmethod
     def from_retrier_props(cls, props: RetrierProps) -> RetrierDecl:
@@ -75,6 +72,8 @@ class RetrierDecl(EvalComponent):
             interval_seconds=props.get(IntervalSecondsDecl),
             max_attempts=props.get(MaxAttemptsDecl),
             backoff_rate=props.get(BackoffRateDecl),
+            max_delay_seconds=props.get(MaxDelaySecondsDecl),
+            jitter_strategy=props.get(JitterStrategyDecl),
             comment=props.get(Comment),
         )
 

@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict
+from typing import Any
 
 from moto.core.responses import BaseResponse
 from moto.route53domains.models import Route53DomainsBackend, route53domains_backends
@@ -8,11 +8,11 @@ from moto.route53domains.validators import Route53Domain, Route53DomainsOperatio
 
 class Route53DomainsResponse(BaseResponse):
     def __init__(self) -> None:
-        super().__init__(service_name="route53-domains")
+        super().__init__(service_name="route53domains")
 
     @property
     def route53domains_backend(self) -> Route53DomainsBackend:
-        return route53domains_backends[self.current_account]["global"]
+        return route53domains_backends[self.current_account][self.partition]
 
     def register_domain(self) -> str:
         domain_name = self._get_param("DomainName")
@@ -73,15 +73,12 @@ class Route53DomainsResponse(BaseResponse):
         )
         res = {
             "Domains": list(map(self.__map_domains_to_info, domains)),
+            "NextPageMarker": marker,
         }
-
-        if marker:
-            res["NextPageMarker"] = marker
-
         return json.dumps(res)
 
     @staticmethod
-    def __map_domains_to_info(domain: Route53Domain) -> Dict[str, Any]:  # type: ignore[misc]
+    def __map_domains_to_info(domain: Route53Domain) -> dict[str, Any]:  # type: ignore[misc]
         return {
             "DomainName": domain.domain_name,
             "AutoRenew": domain.auto_renew,
@@ -110,11 +107,8 @@ class Route53DomainsResponse(BaseResponse):
 
         res = {
             "Operations": [operation.to_json() for operation in operations],
+            "NextPageMarker": marker,
         }
-
-        if marker:
-            res["NextPageMarker"] = marker
-
         return json.dumps(res)
 
     def get_operation_detail(self) -> str:

@@ -11,21 +11,17 @@ jobs:
         ruby-version: ['3.3']
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Ruby ${{ matrix.ruby-version }}
-        uses: ruby/setup-ruby@cacc9f1c0b3f4eb8a16a6bb0ed10897b43b9de49
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8
         with:
           ruby-version: ${{ matrix.ruby-version }}
-      - name: Set up Python 3.8
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.10"
+          python-version: "3.12"
       - name: Start MotoServer
-        run: |
-          pip install build
-          python -m build
-          docker run --rm -t --name motoserver -e TEST_SERVER_MODE=true -e AWS_SECRET_ACCESS_KEY=server_secret -e AWS_ACCESS_KEY_ID=server_key -v `pwd`:/moto -p 5000:5000 -v /var/run/docker.sock:/var/run/docker.sock python:3.10-slim /moto/scripts/ci_moto_server.sh &
-          python scripts/ci_wait_for_server.py
+        uses: ./.github/actions/run_moto_server
       - name: Install dependencies
         run: cd other_langs/tests_ruby && bundle install
       - name: Run tests

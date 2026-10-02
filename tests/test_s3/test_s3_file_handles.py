@@ -93,7 +93,7 @@ class TestS3FileHandleClosures(TestCase):
 
     @verify_zero_warnings
     def test_part_upload(self):
-        multipart_id = self.s3_client.create_multipart_upload(
+        multipart = self.s3_client.create_multipart_upload(
             bucket_name=TEST_BUCKET,
             key_name="mp-key",
             metadata={},
@@ -105,14 +105,14 @@ class TestS3FileHandleClosures(TestCase):
         )
         self.s3_client.upload_part(
             bucket_name=TEST_BUCKET,
-            multipart_id=multipart_id,
+            multipart_id=multipart.id,
             part_id=1,
             value="b" * 10_000_000,
         )
 
     @verify_zero_warnings
     def test_overwriting_part_upload(self):
-        multipart_id = self.s3_client.create_multipart_upload(
+        multipart = self.s3_client.create_multipart_upload(
             bucket_name=TEST_BUCKET,
             key_name="mp-key",
             metadata={},
@@ -124,20 +124,20 @@ class TestS3FileHandleClosures(TestCase):
         )
         self.s3_client.upload_part(
             bucket_name=TEST_BUCKET,
-            multipart_id=multipart_id,
+            multipart_id=multipart.id,
             part_id=1,
             value="b" * 10_000_000,
         )
         self.s3_client.upload_part(
             bucket_name=TEST_BUCKET,
-            multipart_id=multipart_id,
+            multipart_id=multipart.id,
             part_id=1,
             value="c" * 10_000_000,
         )
 
     @verify_zero_warnings
     def test_aborting_part_upload(self):
-        multipart_id = self.s3_client.create_multipart_upload(
+        multipart = self.s3_client.create_multipart_upload(
             bucket_name=TEST_BUCKET,
             key_name="mp-key",
             metadata={},
@@ -149,17 +149,17 @@ class TestS3FileHandleClosures(TestCase):
         )
         self.s3_client.upload_part(
             bucket_name=TEST_BUCKET,
-            multipart_id=multipart_id,
+            multipart_id=multipart.id,
             part_id=1,
             value="b" * 10_000_000,
         )
         self.s3_client.abort_multipart_upload(
-            bucket_name=TEST_BUCKET, multipart_id=multipart_id
+            bucket_name=TEST_BUCKET, multipart_id=multipart.id
         )
 
     @verify_zero_warnings
     def test_completing_part_upload(self):
-        multipart_id = self.s3_client.create_multipart_upload(
+        multipart = self.s3_client.create_multipart_upload(
             bucket_name=TEST_BUCKET,
             key_name="mp-key",
             metadata={},
@@ -171,7 +171,7 @@ class TestS3FileHandleClosures(TestCase):
         )
         etag = self.s3_client.upload_part(
             bucket_name=TEST_BUCKET,
-            multipart_id=multipart_id,
+            multipart_id=multipart.id,
             part_id=1,
             value="b" * 10_000_000,
         ).etag
@@ -184,7 +184,7 @@ class TestS3FileHandleClosures(TestCase):
         )
         body = S3Response()._complete_multipart_body(mp_body)
         self.s3_client.complete_multipart_upload(
-            bucket_name=TEST_BUCKET, multipart_id=multipart_id, body=body
+            bucket_name=TEST_BUCKET, multipart_id=multipart.id, body=body
         )
 
     @verify_zero_warnings
@@ -335,7 +335,11 @@ def test_verify_key_can_be_copied_after_disposing():
     # This test verifies the copy-operation succeeds, it will just not
     # have any data.
     key = s3model.FakeKey(
-        name="test", bucket_name="bucket", value="sth", account_id=DEFAULT_ACCOUNT_ID
+        name="test",
+        bucket_name="bucket",
+        value="sth",
+        account_id=DEFAULT_ACCOUNT_ID,
+        region_name="us-east-1",
     )
     assert not key._value_buffer.closed
     key.dispose()

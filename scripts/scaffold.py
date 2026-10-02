@@ -26,7 +26,6 @@ import re
 import inspect
 import importlib
 import subprocess
-from lxml import etree
 
 import click
 import jinja2
@@ -165,10 +164,7 @@ def initialize_service(service, api_protocol):
 
     client = boto3.client(service)
     service_class = client.__class__.__name__
-    endpoint_prefix = (
-        # pylint: disable=protected-access
-        client._service_model.endpoint_prefix
-    )
+    endpoint_prefix = client._service_model.endpoint_prefix
 
     tmpl_context = {
         "service": service,
@@ -228,7 +224,7 @@ def get_operation_name_in_keys(operation_name, operation_keys):
     return operation_keys[index]
 
 
-def get_function_in_responses(service, operation, protocol):  # pylint: disable=too-many-locals
+def get_function_in_responses(service, operation, protocol): 
     """refers to definition of API in botocore, and autogenerates function
     You can see example of elbv2 from link below.
       https://github.com/boto/botocore/blob/develop/botocore/data/elbv2/2015-12-01/service-2.json
@@ -236,7 +232,6 @@ def get_function_in_responses(service, operation, protocol):  # pylint: disable=
     escaped_service = get_escaped_service(service)
     client = boto3.client(service)
 
-    # pylint: disable=protected-access
     aws_operation_name = get_operation_name_in_keys(
         to_upper_camel_case(operation),
         list(client._service_model._service_description["operations"].keys()),
@@ -274,9 +269,8 @@ def get_function_in_responses(service, operation, protocol):  # pylint: disable=
 
     body += "    )\n"
     if protocol in ["query", "rest-xml"]:
-        body += f"    template = self.response_template({operation.upper()}_TEMPLATE)\n"
-        names = ", ".join([f"{n}={n}" for n in output_names])
-        body += f"    return template.render({names})\n"
+        body += get_result_dict_template(service, operation)
+        body += f"    return ActionResult(result)\n"
     elif protocol in ["json", "rest-json"]:
         body += "    # TODO: adjust response\n"
         names = ", ".join([f"{to_lower_camel_case(_)}={_}" for _ in output_names])
@@ -291,7 +285,6 @@ def get_function_in_models(service, operation):
     """
     client = boto3.client(service)
 
-    # pylint: disable=protected-access
     aws_operation_name = get_operation_name_in_keys(
         to_upper_camel_case(operation),
         list(client._service_model._service_description["operations"].keys()),
@@ -336,201 +329,93 @@ def get_func_in_tests(service, operation):
     return body
 
 
-def _get_subtree(name, shape, replace_list, name_prefix=None):
+def _get_dict_entry(name, shape, indent, name_prefix=None):
+    """Recursively build a Python dict string entry for an output shape member."""
     if not name_prefix:
         name_prefix = []
 
     class_name = shape.__class__.__name__
     shape_type = shape.type_name
-    if class_name in ("StringShape", "Shape") or shape_type == "structure":
-        tree = etree.Element(name)  # pylint: disable=c-extension-no-member
-        if name_prefix:
-            tree.text = f"{{{{ {name_prefix[-1]}.{to_snake_case(name)} }}}}"
-        else:
-            tree.text = f"{{{{ {to_snake_case(name)} }}}}"
-        return tree
+    prefix = " " * indent
 
-    if class_name in ("ListShape",) or shape_type == "list":
-        # pylint: disable=c-extension-no-member
-        replace_list.append((name, name_prefix))
-        tree = etree.Element(name)
-        t_member = etree.Element("member")
-        tree.append(t_member)
-        if hasattr(shape.member, "members"):
-            for nested_name, nested_shape in shape.member.members.items():
-                t_member.append(
-                    _get_subtree(
-                        nested_name,
-                        nested_shape,
-                        replace_list,
-                        name_prefix + [singularize(name.lower())],
+    if class_name in ("StringShape", "Shape") or shape_type == "structure":
+        if shape_type == "structure" and hasattr(shape, "members") and shape.members:
+            # Nested structure - recurse into members
+            lines = [f'{prefix}"{name}": {{']
+            for member_name, member_shape in shape.members.items():
+                lines.append(
+                    _get_dict_entry(
+                        member_name,
+                        member_shape,
+                        indent + 4,
+                        name_prefix,
                     )
                 )
-        return tree
+            lines.append(f"{prefix}}},")
+            return "\n".join(lines)
+        else:
+            if name_prefix:
+                var = f"{name_prefix[-1]}.{to_snake_case(name)}"
+            else:
+                var = to_snake_case(name)
+            return f'{prefix}"{name}": {var},'
+
+    if class_name in ("ListShape",) or shape_type == "list":
+        singular = singularize(name.lower())
+        if name_prefix:
+            iter_var = f"{name_prefix[-1]}.{to_snake_case(name)}"
+        else:
+            iter_var = to_snake_case(name)
+
+        if hasattr(shape.member, "members") and shape.member.members:
+            lines = [f'{prefix}"{name}": [']
+            lines.append(f"{prefix}    {{")
+            for member_name, member_shape in shape.member.members.items():
+                lines.append(
+                    _get_dict_entry(
+                        member_name,
+                        member_shape,
+                        indent + 8,
+                        name_prefix + [singular],
+                    )
+                )
+            lines.append(f"{prefix}    }}")
+            lines.append(f"{prefix}    for {singular} in {iter_var}")
+            lines.append(f"{prefix}],")
+            return "\n".join(lines)
+        else:
+            return f'{prefix}"{name}": {iter_var},'
+
     raise ValueError(f"Not supported Shape: {shape}")
 
 
-def get_response_query_template(service, operation):  # pylint: disable=too-many-locals
-    """refers to definition of API in botocore, and autogenerates template
-    Assume that response format is xml when protocol is query
+def get_result_dict_template(service, operation):
+    """Refers to definition of API in botocore, and autogenerates a Python
+    dict template representing the output model of the boto3 client operation.
 
     You can see example of elbv2 from link below.
       https://github.com/boto/botocore/blob/develop/botocore/data/elbv2/2015-12-01/service-2.json
     """
     client = boto3.client(service)
 
-    # pylint: disable=protected-access
     aws_operation_name = get_operation_name_in_keys(
         to_upper_camel_case(operation),
         list(client._service_model._service_description["operations"].keys()),
     )
 
     op_model = client._service_model.operation_model(aws_operation_name)
-    result_wrapper = op_model.output_shape.serialization["resultWrapper"]
-    response_wrapper = result_wrapper.replace("Result", "Response")
-    metadata = op_model.metadata
-    xml_namespace = metadata["xmlNamespace"]
+    if not hasattr(op_model.output_shape, "members"):
+        outputs = {}
+    else:
+        outputs = op_model.output_shape.members
 
-    # build xml tree
-    # pylint: disable=c-extension-no-member
-    t_root = etree.Element(response_wrapper, xmlns=xml_namespace)
-
-    # build metadata
-    t_metadata = etree.Element("ResponseMetadata")
-    t_request_id = etree.Element("RequestId")
-    t_request_id.text = "1549581b-12b7-11e3-895e-1334aEXAMPLE"
-    t_metadata.append(t_request_id)
-    t_root.append(t_metadata)
-
-    # build result
-    t_result = etree.Element(result_wrapper)
-    outputs = op_model.output_shape.members
-    replace_list = []
+    lines = [f"    result = {{"]
     for output_name, output_shape in outputs.items():
-        t_result.append(_get_subtree(output_name, output_shape, replace_list))
-    t_root.append(t_result)
-    xml_body = etree.tostring(t_root, pretty_print=True).decode("utf-8")
-    xml_body_lines = xml_body.splitlines()
-    for replace in replace_list:
-        name = replace[0]
-        prefix = replace[1]
-        singular_name = singularize(name)
-
-        start_tag = f"<{name}>"
-        iter_name = f"{prefix[-1]}.{name.lower()}" if prefix else name.lower()
-        loop_start = f"{{% for {singular_name.lower()} in {iter_name} %}}"
-        end_tag = f"</{name}>"
-        loop_end = "{% endfor %}"
-
-        start_tag_indexes = [i for i, l in enumerate(xml_body_lines) if start_tag in l]
-        if len(start_tag_indexes) != 1:
-            raise Exception(f"tag {start_tag} not found in response body")
-        start_tag_index = start_tag_indexes[0]
-        xml_body_lines.insert(start_tag_index + 1, loop_start)
-
-        end_tag_indexes = [i for i, l in enumerate(xml_body_lines) if end_tag in l]
-        if len(end_tag_indexes) != 1:
-            raise Exception(f"tag {end_tag} not found in response body")
-        end_tag_index = end_tag_indexes[0]
-        xml_body_lines.insert(end_tag_index, loop_end)
-    xml_body = "\n".join(xml_body_lines)
-    body = f'\n{operation.upper()}_TEMPLATE = """{xml_body}"""'
-    return body
-
-
-def get_response_restxml_template(service, operation):
-    """refers to definition of API in botocore, and autogenerates template
-    Assume that protocol is rest-xml. Shares some familiarity with protocol=query
-    """
-    client = boto3.client(service)
-    aws_operation_name = get_operation_name_in_keys(
-        to_upper_camel_case(operation),
-        list(client._service_model._service_description["operations"].keys()),
-    )
-    op_model = client._service_model.operation_model(aws_operation_name)
-    result_wrapper = op_model._operation_model["output"]["shape"]
-    response_wrapper = result_wrapper.replace("Result", "Response")
-    metadata = op_model.metadata
-
-    shapes = client._service_model._shape_resolver._shape_map
-
-    # build xml tree
-    t_root = etree.Element(response_wrapper)
-
-    # build metadata
-    t_metadata = etree.Element("ResponseMetadata")
-    t_request_id = etree.Element("RequestId")
-    t_request_id.text = "1549581b-12b7-11e3-895e-1334aEXAMPLE"
-    t_metadata.append(t_request_id)
-    t_root.append(t_metadata)
-
-    def _find_member(tree, shape_name, name_prefix):
-        shape = shapes[shape_name]
-        if shape["type"] == "list":
-            t_for = etree.Element("REPLACE_FOR")
-            t_for.set("for", to_snake_case(shape_name))
-            t_for.set("in", ".".join(name_prefix[:-1]) + "." + shape_name)
-            member_shape = shape["member"]["shape"]
-            member_name = shape["member"].get("locationName")
-            if member_shape in PRIMITIVE_SHAPES:
-                t_member = etree.Element(member_name)
-                t_member.text = f"{{{{ {to_snake_case(shape_name)}.{to_snake_case(member_name)} }}}}"
-                t_for.append(t_member)
-            else:
-                _find_member(t_for, member_shape, [to_snake_case(shape_name)])
-            tree.append(t_for)
-        elif shape["type"] in PRIMITIVE_SHAPES:
-            tree.text = f"{{{{ {shape_name} }}}}"
-        else:
-            for child, details in shape["members"].items():
-                child = details.get("locationName", child)
-                if details["shape"] in PRIMITIVE_SHAPES:
-                    t_member = etree.Element(child)
-                    t_member.text = (
-                        "{{ " + ".".join(name_prefix) + f".{to_snake_case(child)} }}}}"
-                    )
-                    tree.append(t_member)
-                else:
-                    t = etree.Element(child)
-                    _find_member(
-                        t, details["shape"], name_prefix + [to_snake_case(child)]
-                    )
-                    tree.append(t)
-
-    # build result
-    t_result = etree.Element(result_wrapper)
-    for name, details in shapes[result_wrapper]["members"].items():
-        shape = details["shape"]
-        name = details.get("locationName", name)
-        if shape in PRIMITIVE_SHAPES:
-            t_member = etree.Element(name)
-            t_member.text = f"{{{{ {to_snake_case(name)} }}}}"
-            t_result.append(t_member)
-        else:
-            _find_member(t_result, name, name_prefix=["root"])
-    t_root.append(t_result)
-    xml_body = etree.tostring(t_root, pretty_print=True).decode("utf-8")
-
-    #
-    # Still need to add FOR-loops in this template
-    #     <REPLACE_FOR for="x" in="y">
-    # becomes
-    #     {% for x in y %}
-    def conv(m):
-        return (
-            m.group()
-            .replace("REPLACE_FOR", "")
-            .replace("=", "")
-            .replace('"', " ")
-            .replace("<", "{%")
-            .replace(">", "%}")
-            .strip()
-        )
-
-    xml_body = re.sub(r"<REPLACE_FOR[\sa-zA-Z\"=_.]+>", conv, xml_body)
-    xml_body = xml_body.replace("</REPLACE_FOR>", "{% endfor %}")
-    body = f'\n{operation.upper()}_TEMPLATE = """{xml_body}"""'
-    return body
+        if output_name in OUTPUT_IGNORED_IN_BACKEND:
+            continue
+        lines.append(_get_dict_entry(output_name, output_shape, indent=8))
+    lines.append("    }\n")
+    return "\n".join(lines)
 
 
 def insert_code_to_class(path, base_class, new_code):
@@ -558,17 +443,18 @@ def insert_code_to_class(path, base_class, new_code):
         fhandle.write(body)
 
 
-def insert_url(service, operation, api_protocol):  # pylint: disable=too-many-locals
+def insert_url(service, operation, api_protocol):
     """Create urls.py with appropriate URL bases and paths."""
     client = boto3.client(service)
     service_class = client.__class__.__name__
 
-    # pylint: disable=protected-access
     aws_operation_name = get_operation_name_in_keys(
         to_upper_camel_case(operation),
         list(client._service_model._service_description["operations"].keys()),
     )
     uri = client._service_model.operation_model(aws_operation_name).http["requestUri"]
+    if "?" in uri:
+        uri = uri.split("?")[0]
 
     path = os.path.join(
         os.path.dirname(__file__), "..", "moto", get_escaped_service(service), "urls.py"
@@ -578,6 +464,7 @@ def insert_url(service, operation, api_protocol):  # pylint: disable=too-many-lo
 
     if any(_ for _ in lines if re.match(uri, _)):
         return
+    uri = BaseResponse.uri_to_regexp(uri)[1:-1]
 
     url_paths_found = False
     last_elem_line_index = -1
@@ -593,7 +480,7 @@ def insert_url(service, operation, api_protocol):  # pylint: disable=too-many-lo
 
     # generate url pattern
     if api_protocol == "rest-json":
-        new_line = f'    "{0}/.*$": {service_class}Response.dispatch,'
+        new_line = f'    "{{0}}{uri}$": {service_class}Response.dispatch,'
     elif api_protocol == "rest-xml":
         new_line = f'    "{{0}}{uri}$": {service_class}Response.{operation},'
     else:
@@ -617,18 +504,6 @@ def insert_codes(service, operation, api_protocol):
     responses_path = f"moto/{escaped_service}/responses.py"
     print_progress("inserting code", responses_path, "green")
     insert_code_to_class(responses_path, BaseResponse, func_in_responses)
-
-    # insert template
-    if api_protocol in ["query", "rest-xml"]:
-        if api_protocol == "query":
-            template = get_response_query_template(service, operation)
-        elif api_protocol == "rest-xml":
-            template = get_response_restxml_template(service, operation)
-        with open(responses_path, encoding="utf-8") as fhandle:
-            lines = [_[:-1] for _ in fhandle.readlines()]
-        lines += template.splitlines()
-        with open(responses_path, "w", encoding="utf-8") as fhandle:
-            fhandle.write("\n".join(lines))
 
     # edit models.py
     models_path = f"moto/{escaped_service}/models.py"
@@ -662,7 +537,6 @@ def main():
     while True:
         operation = select_operation(service)
 
-        # pylint: disable=protected-access
         api_protocol = boto3.client(service)._service_model.metadata["protocol"]
         initialize_service(service, api_protocol)
 

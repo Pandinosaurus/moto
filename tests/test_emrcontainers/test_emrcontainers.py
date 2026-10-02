@@ -1,14 +1,16 @@
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from unittest import SkipTest
 from unittest.mock import patch
 
 import boto3
 import pytest
-from botocore.exceptions import ClientError, ParamValidationError
+from botocore.exceptions import ClientError
+from dateutil.tz import tzutc
 
 from moto import mock_aws, settings
 from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
+from moto.core.utils import utcnow
 
 DEFAULT_REGION = "us-east-1"
 
@@ -177,9 +179,9 @@ class TestDescribeVirtualCluster:
                 "type": "EKS",
             },
             "createdAt": (
-                datetime.today()
+                utcnow()
                 .replace(hour=0, minute=0, second=0, microsecond=0)
-                .replace(tzinfo=timezone.utc)
+                .replace(tzinfo=tzutc())
             ),
             "id": self.virtual_cluster_ids[0],
             "name": "test-emr-virtual-cluster",
@@ -199,12 +201,12 @@ class TestDescribeVirtualCluster:
 
 
 class TestListVirtualClusters:
-    today = datetime.now()
+    today = utcnow()
     yesterday = today - timedelta(days=1)
     tomorrow = today + timedelta(days=1)
 
     @pytest.fixture(autouse=True)
-    def _setup_environment(self, client, virtual_cluster_factory):  # pylint: disable=unused-argument
+    def _setup_environment(self, client, virtual_cluster_factory):
         self.client = client
 
     @pytest.mark.parametrize(
@@ -252,9 +254,15 @@ class TestListVirtualClusters:
     def test_next_token(self):
         resp = self.client.list_virtual_clusters(maxResults=2)
         assert len(resp["virtualClusters"]) == 2
+        assert "nextToken" in resp
 
         resp = self.client.list_virtual_clusters(nextToken=resp["nextToken"])
         assert len(resp["virtualClusters"]) == 2
+        assert "nextToken" not in resp
+
+        resp = self.client.list_virtual_clusters(maxResults=4)
+        assert len(resp["virtualClusters"]) == 4
+        assert "nextToken" not in resp
 
 
 class TestStartJobRun:
@@ -310,22 +318,6 @@ class TestStartJobRun:
             f"/virtualclusters/{self.virtual_cluster_id}/jobruns/{resp['id']}"
         )
         assert resp["virtualClusterId"] == self.virtual_cluster_id
-
-    def test_invalid_execution_role_arn(self):
-        with pytest.raises(ParamValidationError) as exc:
-            self.client.start_job_run(
-                name="test_job",
-                virtualClusterId="foobaa",
-                executionRoleArn="foobaa",
-                releaseLabel="foobaa",
-                jobDriver={},
-            )
-
-        assert exc.typename == "ParamValidationError"
-        assert (
-            "Parameter validation failed:\nInvalid length for parameter "
-            "executionRoleArn, value: 6, valid min length: 20"
-        ) in exc.value.args
 
     def test_invalid_virtual_cluster_id(self):
         with pytest.raises(ClientError) as exc:
@@ -428,12 +420,12 @@ class TestCancelJobRun:
 
 
 class TestListJobRuns:
-    today = datetime.now()
+    today = utcnow()
     yesterday = today - timedelta(days=1)
     tomorrow = today + timedelta(days=1)
 
     @pytest.fixture(autouse=True)
-    def _setup_environment(self, client, virtual_cluster_factory, job_factory):  # pylint: disable=unused-argument
+    def _setup_environment(self, client, virtual_cluster_factory, job_factory):
         self.client = client
         self.virtual_cluster_id = virtual_cluster_factory[0]
 
@@ -515,15 +507,15 @@ class TestDescribeJobRun:
                 f"/jobruns/{self.job_list[2]}"
             ),
             "createdAt": (
-                datetime.today()
+                utcnow()
                 .replace(hour=0, minute=0, second=0, microsecond=0)
-                .replace(tzinfo=timezone.utc)
+                .replace(tzinfo=tzutc())
             ),
             "executionRoleArn": f"arn:aws:iam::{ACCOUNT_ID}:role/iamrole-emrcontainers",
             "finishedAt": (
-                datetime.today()
+                utcnow()
                 .replace(hour=0, minute=1, second=0, microsecond=0)
-                .replace(tzinfo=timezone.utc)
+                .replace(tzinfo=tzutc())
             ),
             "id": self.job_list[2],
             "jobDriver": {

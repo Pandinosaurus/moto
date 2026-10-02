@@ -305,12 +305,16 @@ def test_describe_broker_unknown():
 
     with pytest.raises(ClientError) as exc:
         client.describe_broker(BrokerId="unknown")
-    err = exc.value.response["Error"]
-    assert err["Code"] == "NotFoundException"
+    resp = exc.value.response
+    error = resp["Error"]
+    metadata = resp["ResponseMetadata"]
+    assert metadata["HTTPStatusCode"] == 404
+    assert error["Code"] == "NotFoundException"
     assert (
-        err["Message"]
+        error["Message"]
         == "Can't find requested broker [unknown]. Make sure your broker exists."
     )
+    assert resp.get("ErrorAttribute") == "broker-id"
 
 
 @mock_aws
@@ -422,5 +426,11 @@ def test_reboot_broker():
     )["BrokerId"]
     client.reboot_broker(BrokerId=broker_id)
 
-    # Noop - nothing to assert or verify
-    pass
+
+@mock_aws
+def test_describe_shared_resources():
+    client = boto3.client("mq", region_name="ap-southeast-1")
+
+    # No-OP at the moment - no validation, always returns an empty list
+    resp = client.describe_shared_resources(BrokerId="sth")
+    assert resp["SharedResources"] == []

@@ -9,12 +9,18 @@ from . import cloudfront_test_scaffolding as scaffold
 
 
 @mock_aws
-def test_create_distribution_s3_minimum():
-    client = boto3.client("cloudfront", region_name="us-west-1")
+@pytest.mark.parametrize(
+    "region,partition", [("us-west-1", "aws"), ("cn-north-1", "aws-cn")]
+)
+def test_create_distribution_s3_minimum(region, partition):
+    client = boto3.client("cloudfront", region_name=region)
     config = scaffold.example_distribution_config("ref")
 
     dist = client.create_distribution(DistributionConfig=config)["Distribution"]
-    assert dist["ARN"] == f"arn:aws:cloudfront:{ACCOUNT_ID}:distribution/{dist['Id']}"
+    assert (
+        dist["ARN"]
+        == f"arn:{partition}:cloudfront::{ACCOUNT_ID}:distribution/{dist['Id']}"
+    )
     assert dist["Status"] == "InProgress"
     assert "LastModifiedTime" in dist
     assert dist["InProgressInvalidationBatches"] == 0
@@ -109,7 +115,7 @@ def test_create_distribution_s3_minimum():
         "CloudFrontDefaultCertificate": True,
         "IAMCertificateId": "",
         "MinimumProtocolVersion": "TLSv1",
-        "SSLSupportMethod": "",
+        "SSLSupportMethod": "sni-only",
     }
 
     restriction = config["Restrictions"]["GeoRestriction"]
@@ -766,3 +772,22 @@ def test_add_new_gateway_basic():
         result["CacheBehaviors"]["Items"][0]["OriginRequestPolicyId"]
         == new_behaviors[0]["OriginRequestPolicyId"]
     )
+
+
+@mock_aws
+def test_list_distributions_config_fields():
+    client = boto3.client("cloudfront", region_name="us-east-1")
+
+    client.create_distribution(
+        DistributionConfig=scaffold.example_distribution_config(ref="ref1")
+    )
+
+    item = client.list_distributions()["DistributionList"]["Items"][0]
+    assert item["Origins"]["Quantity"] == 1
+    assert (
+        item["Origins"]["Items"][0]["DomainName"] == "asdf.s3.us-east-1.amazonaws.com"
+    )
+    assert item["DefaultCacheBehavior"]["ViewerProtocolPolicy"] == "allow-all"
+    assert item["ViewerCertificate"]["CloudFrontDefaultCertificate"] is True
+    assert item["Enabled"] is False
+    assert item["Comment"] == "an optional comment that's not actually optional"

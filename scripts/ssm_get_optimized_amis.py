@@ -4,7 +4,6 @@ from datetime import timezone
 from pathlib import Path
 
 import boto3
-import botocore
 
 from moto.core.utils import unix_time
 from moto.ec2.utils import gen_moto_amis
@@ -51,7 +50,10 @@ def main():
      - Download from AWS
      - Store this in the dedicated moto/ssm/resources-folder
     """
-    for region in session.get_available_regions("ssm"):
+    regions = session.get_available_regions("ssm")
+    # Malaysia is a new region, and not yet exposed by get_available_regions
+    regions.append("ap-southeast-5")
+    for region in regions:
         ssm_client = session.client("ssm", region_name=region)
 
         default_param_path = "/aws/service/ecs/optimized-ami"
@@ -96,7 +98,7 @@ def main():
             save_to_file(destination_path, image_as_dicts)
 
             time.sleep(0.5)
-        except botocore.exceptions.ClientError as e:
+        except Exception as e:
             print(e)
             # We might encounter an error if we do not have access to a region - just ignore and try the next region
 

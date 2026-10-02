@@ -15,7 +15,6 @@ from .hosts import HostsResponse
 from .iam_instance_profiles import IamInstanceProfiles
 from .instances import InstanceResponse
 from .internet_gateways import InternetGateways
-from .ip_addresses import IPAddresses
 from .key_pairs import KeyPairs
 from .launch_templates import LaunchTemplates
 from .monitoring import Monitoring
@@ -29,6 +28,7 @@ from .spot_fleets import SpotFleets
 from .spot_instances import SpotInstances
 from .subnets import Subnets
 from .tags import TagResponse
+from .traffic_mirrors import TrafficMirrors
 from .transit_gateway_attachments import TransitGatewayAttachment
 from .transit_gateway_route_tables import TransitGatewayRouteTable
 from .transit_gateways import TransitGateways
@@ -55,7 +55,6 @@ class EC2Response(
     InstanceResponse,
     InternetGateways,
     EgressOnlyInternetGateway,
-    IPAddresses,
     KeyPairs,
     LaunchTemplates,
     Monitoring,
@@ -76,6 +75,7 @@ class EC2Response(
     VPNConnections,
     Windows,
     NatGateways,
+    TrafficMirrors,
     TransitGateways,
     TransitGatewayRouteTable,
     TransitGatewayAttachment,
@@ -84,6 +84,7 @@ class EC2Response(
 ):
     def __init__(self) -> None:
         super().__init__(service_name="ec2")
+        self.automated_parameter_parsing = True
 
     @property
     def should_autoescape(self) -> bool:

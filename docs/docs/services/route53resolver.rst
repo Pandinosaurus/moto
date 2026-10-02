@@ -18,21 +18,26 @@ route53resolver
 
 - [ ] associate_firewall_rule_group
 - [X] associate_resolver_endpoint_ip_address
-- [ ] associate_resolver_query_log_config
+- [X] associate_resolver_query_log_config
+  Associate a VPC with a resolver query log config.
+
 - [X] associate_resolver_rule
+- [ ] batch_create_firewall_rule
+- [ ] batch_delete_firewall_rule
+- [ ] batch_update_firewall_rule
 - [ ] create_firewall_domain_list
 - [ ] create_firewall_rule
 - [ ] create_firewall_rule_group
 - [ ] create_outpost_resolver
 - [X] create_resolver_endpoint
   
-        Return description for a newly created resolver endpoint.
+Return description for a newly created resolver endpoint.
 
-        NOTE:  IPv6 IPs are currently not being filtered when
-        calculating the create_resolver_endpoint() IpAddresses.
-        
+NOTE:  IPv6 IPs are currently not being filtered when
+calculating the create_resolver_endpoint() IpAddresses.
 
-- [ ] create_resolver_query_log_config
+
+- [X] create_resolver_query_log_config
 - [X] create_resolver_rule
   Return description for a newly created resolver rule.
 
@@ -54,10 +59,16 @@ route53resolver
 - [ ] get_firewall_rule_group_policy
 - [ ] get_outpost_resolver
 - [ ] get_resolver_config
-- [ ] get_resolver_dnssec_config
+- [X] get_resolver_dnssec_config
+  Get information about a resolver DNSSEC config.
+
 - [X] get_resolver_endpoint
-- [ ] get_resolver_query_log_config
-- [ ] get_resolver_query_log_config_association
+- [X] get_resolver_query_log_config
+  Get information about a resolver query log config.
+
+- [X] get_resolver_query_log_config_association
+  Get information about a resolver query log config association.
+
 - [ ] get_resolver_query_log_config_policy
 - [X] get_resolver_rule
   Return info for specified resolver rule.
@@ -70,14 +81,15 @@ route53resolver
 - [ ] list_firewall_domains
 - [ ] list_firewall_rule_group_associations
 - [ ] list_firewall_rule_groups
+- [ ] list_firewall_rule_types
 - [ ] list_firewall_rules
 - [ ] list_outpost_resolvers
 - [ ] list_resolver_configs
-- [ ] list_resolver_dnssec_configs
+- [X] list_resolver_dnssec_configs
 - [X] list_resolver_endpoint_ip_addresses
 - [X] list_resolver_endpoints
-- [ ] list_resolver_query_log_config_associations
-- [ ] list_resolver_query_log_configs
+- [X] list_resolver_query_log_config_associations
+- [X] list_resolver_query_log_configs
 - [X] list_resolver_rule_associations
 - [X] list_resolver_rules
 - [X] list_tags_for_resource
@@ -92,7 +104,9 @@ route53resolver
 - [ ] update_firewall_rule_group_association
 - [ ] update_outpost_resolver
 - [ ] update_resolver_config
-- [ ] update_resolver_dnssec_config
+- [X] update_resolver_dnssec_config
+  Update the configuration of the DNSSEC validation.
+
 - [X] update_resolver_endpoint
 - [ ] update_resolver_rule
 

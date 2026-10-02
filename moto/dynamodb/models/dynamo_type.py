@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import base64
 import copy
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, cast
 
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 from botocore.utils import merge_dicts
@@ -12,6 +14,7 @@ from moto.dynamodb.exceptions import (
     IncorrectDataType,
     ItemSizeTooLarge,
 )
+from moto.utilities.utils import md5_hash
 
 from .utilities import bytesize, find_nested_key
 
@@ -55,13 +58,13 @@ class DDBTypeConversion:
         return cls._human_type_mapping.get(abbreviated_type, abbreviated_type)
 
 
-class DynamoType(object):
+class DynamoType:
     """
     http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DataModel.html#DataModelDataTypes
     """
 
-    def __init__(self, type_as_dict: Union["DynamoType", Dict[str, Any]]):
-        if type(type_as_dict) == DynamoType:
+    def __init__(self, type_as_dict: DynamoType | dict[str, Any]):
+        if type(type_as_dict) is DynamoType:
             self.type: str = type_as_dict.type
             self.value: Any = type_as_dict.value
         else:
@@ -70,40 +73,59 @@ class DynamoType(object):
         if self.is_list():
             self.value = [DynamoType(val) for val in self.value]
         elif self.is_map():
-            self.value = dict((k, DynamoType(v)) for k, v in self.value.items())
+            self.value = {k: DynamoType(v) for k, v in self.value.items()}
 
     def __hash__(self) -> int:
-        return hash((self.type, self.value))
+        return hash((self.type, self.cast_value))
 
-    def __eq__(self, other: "DynamoType") -> bool:  # type: ignore[override]
-        return self.type == other.type and self.value == other.value
+    def __eq__(self, other: DynamoType) -> bool:  # type: ignore[override]
+        return self.type == other.type and self.cast_value == other.cast_value
 
-    def __ne__(self, other: "DynamoType") -> bool:  # type: ignore[override]
-        return self.type != other.type or self.value != other.value
+    def __ne__(self, other: DynamoType) -> bool:  # type: ignore[override]
+        return self.type != other.type or self.cast_value != other.cast_value
 
-    def __lt__(self, other: "DynamoType") -> bool:
+    def __lt__(self, other: DynamoType) -> bool:
         return self.cast_value < other.cast_value
 
-    def __le__(self, other: "DynamoType") -> bool:
+    def __le__(self, other: DynamoType) -> bool:
         return self.cast_value <= other.cast_value
 
-    def __gt__(self, other: "DynamoType") -> bool:
+    def __gt__(self, other: DynamoType) -> bool:
         return self.cast_value > other.cast_value
 
-    def __ge__(self, other: "DynamoType") -> bool:
+    def __ge__(self, other: DynamoType) -> bool:
         return self.cast_value >= other.cast_value
 
     def __repr__(self) -> str:
         return f"DynamoType: {self.to_json()}"
 
-    def __add__(self, other: "DynamoType") -> "DynamoType":
+    def __deepcopy__(self, memo: dict[int, Any]) -> DynamoType:
+        """Custom deepcopy that bypasses the expensive default pickle-based
+        __reduce_ex__ protocol. Safe for DynamoDB AttributeValue trees,
+        which are acyclic."""
+        if id(self) in memo:  # pragma: no cover
+            return memo[id(self)]  # Circular refs can't occur in DynamoDB data
+        result = self.__class__.__new__(self.__class__)
+        memo[id(self)] = result
+        result.type = self.type
+        if self.is_list():
+            result.value = [copy.deepcopy(v, memo) for v in self.value]
+        elif self.is_map():
+            result.value = {k: copy.deepcopy(v, memo) for k, v in self.value.items()}
+        elif self.is_set():
+            result.value = list(self.value)
+        else:
+            result.value = self.value
+        return result
+
+    def __add__(self, other: DynamoType) -> DynamoType:
         if self.type != other.type:
             raise TypeError("Different types of operandi is not allowed.")
         if self.is_number():
-            self_value: Union[Decimal, int] = (
+            self_value: Decimal | int = (
                 Decimal(self.value) if "." in self.value else int(self.value)
             )
-            other_value: Union[Decimal, int] = (
+            other_value: Decimal | int = (
                 Decimal(other.value) if "." in other.value else int(other.value)
             )
             total = self_value + other_value
@@ -111,17 +133,21 @@ class DynamoType(object):
         else:
             raise IncorrectDataType()
 
-    def __sub__(self, other: "DynamoType") -> "DynamoType":
+    def __sub__(self, other: DynamoType) -> DynamoType:
         if self.type != other.type:
             raise TypeError("Different types of operandi is not allowed.")
         if self.type == DDBType.NUMBER:
-            self_value = float(self.value) if "." in self.value else int(self.value)
-            other_value = float(other.value) if "." in other.value else int(other.value)
+            self_value: Decimal | int = (
+                Decimal(self.value) if "." in self.value else int(self.value)
+            )
+            other_value: Decimal | int = (
+                Decimal(other.value) if "." in other.value else int(other.value)
+            )
             return DynamoType({DDBType.NUMBER: f"{self_value - other_value}"})
         else:
             raise TypeError("Sum only supported for Numbers.")
 
-    def __getitem__(self, item: "DynamoType") -> "DynamoType":
+    def __getitem__(self, item: DynamoType) -> DynamoType:
         if isinstance(item, str):
             # If our DynamoType is a map it should be subscriptable with a key
             if self.type == DDBType.MAP:
@@ -148,24 +174,28 @@ class DynamoType(object):
         else:
             raise NotImplementedError(f"No set_item for {type(key)}")
 
+    def __delitem__(self, item: str) -> DynamoType:
+        if isinstance(item, str) and self.type == DDBType.MAP:
+            del self.value[item]
+        return self
+
     @property
     def cast_value(self) -> Any:  # type: ignore[misc]
         if self.is_number():
-            try:
-                return int(self.value)
-            except ValueError:
-                return float(self.value)
+            return Decimal(self.value)
         elif self.is_set():
             sub_type = self.type[0]
-            return set([DynamoType({sub_type: v}).cast_value for v in self.value])
+            return {DynamoType({sub_type: v}).cast_value for v in self.value}
         elif self.is_list():
             return [DynamoType(v).cast_value for v in self.value]
         elif self.is_map():
-            return dict([(k, DynamoType(v).cast_value) for k, v in self.value.items()])
+            return {k: DynamoType(v).cast_value for k, v in self.value.items()}
+        elif self.is_null():
+            return None
         else:
             return self.value
 
-    def child_attr(self, key: Union[int, str, None]) -> Optional["DynamoType"]:
+    def child_attr(self, key: int | str | None) -> DynamoType | None:
         """
         Get Map or List children by key. str for Map, int for List.
 
@@ -200,7 +230,7 @@ class DynamoType(object):
             value_size = bytesize(self.value)
         return value_size
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         # Returns a regular JSON object where the value can still be/contain a DynamoType
         if self.is_binary() and isinstance(self.value, bytes):
             # Binary data cannot be represented in JSON
@@ -208,7 +238,7 @@ class DynamoType(object):
             return {self.type: base64.b64encode(self.value).decode("utf-8")}
         return {self.type: self.value}
 
-    def to_regular_json(self) -> Dict[str, Any]:
+    def to_regular_json(self) -> dict[str, Any]:
         # Returns a regular JSON object in full
         value = copy.deepcopy(self.value)
         if isinstance(value, dict):
@@ -223,11 +253,11 @@ class DynamoType(object):
                 val.to_regular_json() if isinstance(val, DynamoType) else val
                 for val in value
             ]
-        if self.is_binary():
+        if self.is_binary() and isinstance(value, str):
             value = base64.b64decode(value)
         return {self.type: value}
 
-    def compare(self, range_comparison: str, range_objs: List[Any]) -> bool:
+    def compare(self, range_comparison: str, range_objs: list[Any]) -> bool:
         """
         Compares this type against comparison filters
         """
@@ -252,7 +282,10 @@ class DynamoType(object):
     def is_binary(self) -> bool:
         return self.type == DDBType.BINARY
 
-    def same_type(self, other: "DynamoType") -> bool:
+    def is_null(self) -> bool:
+        return self.type == DDBType.NULL
+
+    def same_type(self, other: DynamoType) -> bool:
         return self.type == other.type
 
     def pop(self, key: str, *args: Any, **kwargs: Any) -> None:
@@ -264,19 +297,19 @@ class DynamoType(object):
 
 # https://github.com/getmoto/moto/issues/1874
 # Ensure that the total size of an item does not exceed 400kb
-class LimitedSizeDict(Dict[str, Any]):
+class LimitedSizeDict(dict[str, Any]):
     def __init__(self, *args: Any, **kwargs: Any):
         self.update(*args, **kwargs)
 
     def __setitem__(self, key: str, value: Any) -> None:
         current_item_size = sum(
             [
-                item.size() if type(item) == DynamoType else bytesize(str(item))
+                item.size() if type(item) is DynamoType else bytesize(str(item))
                 for item in (list(self.keys()) + list(self.values()))
             ]
         )
         new_item_size = bytesize(key) + (
-            value.size() if type(value) == DynamoType else bytesize(str(value))
+            value.size() if type(value) is DynamoType else bytesize(str(value))
         )
         # Official limit is set to 400000 (400KB)
         # Manual testing confirms that the actual limit is between 409 and 410KB
@@ -290,8 +323,8 @@ class Item(BaseModel):
     def __init__(
         self,
         hash_key: DynamoType,
-        range_key: Optional[DynamoType],
-        attrs: Dict[str, Any],
+        range_key: DynamoType | None,
+        attrs: dict[str, Any],
     ):
         self.hash_key = hash_key
         self.range_key = range_key
@@ -300,7 +333,7 @@ class Item(BaseModel):
         for key, value in attrs.items():
             self.attrs[key] = DynamoType(value)
 
-    def __eq__(self, other: "Item") -> bool:  # type: ignore[override]
+    def __eq__(self, other: Item) -> bool:  # type: ignore[override]
         return all(
             [
                 self.hash_key == other.hash_key,
@@ -312,11 +345,31 @@ class Item(BaseModel):
     def __repr__(self) -> str:
         return f"Item: {self.to_json()}"
 
+    def __deepcopy__(self, memo: dict[int, Any]) -> Item:
+        """Custom deepcopy that bypasses the expensive default pickle-based
+        __reduce_ex__ protocol, and skips LimitedSizeDict size validation
+        during copy (the source item already passed validation on write)."""
+        if id(self) in memo:  # pragma: no cover
+            return memo[id(self)]  # Circular refs can't occur in DynamoDB data
+        result = cast(Item, self.__class__.__new__(self.__class__))
+        memo[id(self)] = result
+        result.hash_key = copy.deepcopy(self.hash_key, memo)
+        result.range_key = copy.deepcopy(self.range_key, memo)
+        # Bypass LimitedSizeDict.__setitem__ which runs O(n) size validation on
+        # every insert. The source item already passed validation, so re-checking
+        # during copy is unnecessary and would make the overall copy O(n²).
+        attrs_copy = LimitedSizeDict.__new__(LimitedSizeDict)
+        dict.__init__(attrs_copy)
+        for key, value in self.attrs.items():
+            dict.__setitem__(attrs_copy, key, copy.deepcopy(value, memo))
+        result.attrs = attrs_copy
+        return result
+
     def size(self) -> int:
         return sum(bytesize(key) + value.size() for key, value in self.attrs.items())
 
-    def to_json(self) -> Dict[str, Any]:
-        attributes: Dict[str, Any] = {}
+    def to_json(self, root_attr_name: str = "Attributes") -> dict[str, Any]:
+        attributes: dict[str, Any] = {}
         for attribute_key, attribute in self.attrs.items():
             if isinstance(attribute.value, dict):
                 attr_dict_value = {
@@ -333,17 +386,17 @@ class Item(BaseModel):
             else:
                 attributes[attribute_key] = {attribute.type: attribute.value}
 
-        return {"Attributes": attributes}
+        return {root_attr_name: attributes}
 
-    def to_regular_json(self) -> Dict[str, Any]:
+    def to_regular_json(self) -> dict[str, Any]:
         attributes = {}
         for key, attribute in self.attrs.items():
             attributes[key] = deserializer.deserialize(attribute.to_regular_json())
         return attributes
 
     def describe_attrs(
-        self, attributes: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Dict[str, Any]]:
+        self, attributes: dict[str, Any] | None = None
+    ) -> dict[str, dict[str, Any]]:
         if attributes:
             included = {}
             for key, value in self.attrs.items():
@@ -354,7 +407,7 @@ class Item(BaseModel):
         return {"Item": included}
 
     def validate_no_empty_key_values(
-        self, attribute_updates: Dict[str, Any], key_attributes: List[str]
+        self, attribute_updates: dict[str, Any], key_attributes: list[str]
     ) -> None:
         for attribute_name, update_action in attribute_updates.items():
             action = update_action.get("Action") or "PUT"  # PUT is default
@@ -364,7 +417,7 @@ class Item(BaseModel):
             if action == "PUT" and new_value == "" and attribute_name in key_attributes:
                 raise EmptyKeyAttributeException
 
-    def update_with_attribute_updates(self, attribute_updates: Dict[str, Any]) -> None:
+    def update_with_attribute_updates(self, attribute_updates: dict[str, Any]) -> None:
         for attribute_name, update_action in attribute_updates.items():
             # Use default Action value, if no explicit Action is passed.
             # Default value is 'Put', according to
@@ -377,32 +430,32 @@ class Item(BaseModel):
             new_value = list(update_action["Value"].values())[0]
             if action == "PUT":
                 # TODO deal with other types
-                if set(update_action["Value"].keys()) == set(["SS"]):
+                if set(update_action["Value"].keys()) == {"SS"}:
                     self.attrs[attribute_name] = DynamoType({"SS": new_value})
-                elif set(update_action["Value"].keys()) == set(["NS"]):
+                elif set(update_action["Value"].keys()) == {"NS"}:
                     self.attrs[attribute_name] = DynamoType({"NS": new_value})
                 elif isinstance(new_value, list):
                     self.attrs[attribute_name] = DynamoType({"L": new_value})
                 elif isinstance(new_value, dict):
                     self.attrs[attribute_name] = DynamoType({"M": new_value})
-                elif set(update_action["Value"].keys()) == set(["N"]):
+                elif set(update_action["Value"].keys()) == {"N"}:
                     self.attrs[attribute_name] = DynamoType({"N": new_value})
-                elif set(update_action["Value"].keys()) == set(["NULL"]):
+                elif set(update_action["Value"].keys()) == {"NULL"}:
                     if attribute_name in self.attrs:
                         del self.attrs[attribute_name]
                 else:
                     self.attrs[attribute_name] = DynamoType({"S": new_value})
             elif action == "ADD":
-                if set(update_action["Value"].keys()) == set(["N"]):
+                if set(update_action["Value"].keys()) == {"N"}:
                     existing = self.attrs.get(attribute_name, DynamoType({"N": "0"}))
                     self.attrs[attribute_name] = DynamoType(
                         {"N": str(Decimal(existing.value) + Decimal(new_value))}
                     )
-                elif set(update_action["Value"].keys()) == set(["SS"]):
+                elif set(update_action["Value"].keys()) == {"SS"}:
                     existing = self.attrs.get(attribute_name, DynamoType({"SS": {}}))
                     new_set = set(existing.value).union(set(new_value))
                     self.attrs[attribute_name] = DynamoType({"SS": list(new_set)})
-                elif set(update_action["Value"].keys()) == set(["NS"]):
+                elif set(update_action["Value"].keys()) == {"NS"}:
                     existing = self.attrs.get(attribute_name, DynamoType({"NS": {}}))
                     new_set = set(existing.value).union(set(new_value))
                     self.attrs[attribute_name] = DynamoType({"NS": list(new_set)})
@@ -413,32 +466,34 @@ class Item(BaseModel):
                 else:
                     # TODO: implement other data types
                     raise NotImplementedError(
-                        "ADD not supported for %s"
-                        % ", ".join(update_action["Value"].keys())
+                        "ADD not supported for {}".format(
+                            ", ".join(update_action["Value"].keys())
+                        )
                     )
             elif action == "DELETE":
-                if set(update_action["Value"].keys()) == set(["SS"]):
+                if set(update_action["Value"].keys()) == {"SS"}:
                     existing = self.attrs.get(attribute_name, DynamoType({"SS": {}}))
                     new_set = set(existing.value).difference(set(new_value))
                     self.attrs[attribute_name] = DynamoType({"SS": list(new_set)})
-                elif set(update_action["Value"].keys()) == set(["NS"]):
+                elif set(update_action["Value"].keys()) == {"NS"}:
                     existing = self.attrs.get(attribute_name, DynamoType({"NS": {}}))
                     new_set = set(existing.value).difference(set(new_value))
                     self.attrs[attribute_name] = DynamoType({"NS": list(new_set)})
                 else:
                     raise NotImplementedError(
-                        "ADD not supported for %s"
-                        % ", ".join(update_action["Value"].keys())
+                        "ADD not supported for {}".format(
+                            ", ".join(update_action["Value"].keys())
+                        )
                     )
             else:
                 raise NotImplementedError(
                     f"{action} action not support for update_with_attribute_updates"
                 )
 
-    def project(self, projection_expressions: List[List[str]]) -> "Item":
+    def project(self, projection_expressions: list[list[str]]) -> Item:
         # Returns a new Item with only the dictionary-keys that match the provided projection_expression
         # Will return an empty Item if the expression does not match anything
-        result: Dict[str, Any] = dict()
+        result: dict[str, Any] = {}
         for expr in projection_expressions:
             x = find_nested_key(expr, self.to_regular_json())
             merge_dicts(result, x)
@@ -450,3 +505,29 @@ class Item(BaseModel):
             # We need to convert that into DynamoDB dictionary ({'M': {'key': {'S': 'value'}}})
             attrs=serializer.serialize(result)["M"],
         )
+
+    def is_within_segment(self, segments: tuple[None, None] | tuple[int, int]) -> bool:
+        """
+        Segments can be either (x, y) or (None, None)
+        None, None => the user requested the entire table, so the item always falls within that
+        x, y       => the user requested segment x out of y
+
+        Segment membership is computed based on the value of the hash key
+        """
+        if segments == (None, None):
+            return True
+
+        segment, total_segments = segments
+        # Creates a reproducible hash number for this item (between 0 and 256)
+        # Note that we can't use the builtin hash() method, as that is not deterministic between executions
+        #
+        # Using a hash based on the hash key ensures parity with how AWS seems to behave:
+        #  - Items are not divided equally between segment
+        #  - Items always fall in the same segment, regardless of how often you call `scan()`
+        #  - Items with the same hash key but different range keys always fall in the same segment
+        #  - Items with different hash keys may be part of different segments
+        #
+        item_hash = md5_hash(self.hash_key.value.encode("utf8")).digest()[0]
+        # Modulo ensures that we always get a number between 0 and (total_segments)
+        item_segment = item_hash % total_segments
+        return segment == item_segment

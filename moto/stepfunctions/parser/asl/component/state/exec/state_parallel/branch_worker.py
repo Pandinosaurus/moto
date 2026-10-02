@@ -1,7 +1,7 @@
 import abc
 import logging
 import threading
-from typing import Final, Optional
+from typing import Final
 
 from moto.stepfunctions.parser.api import Timestamp
 from moto.stepfunctions.parser.asl.component.program.program import Program
@@ -18,7 +18,7 @@ class BranchWorker:
 
     _branch_worker_comm: Final[BranchWorkerComm]
     _program: Final[Program]
-    _worker_thread: Optional[threading.Thread]
+    _worker_thread: threading.Thread | None
     env: Final[Environment]
 
     def __init__(
@@ -30,9 +30,9 @@ class BranchWorker:
         self._worker_thread = None
 
     def _thread_routine(self) -> None:
-        LOG.info(f"[BranchWorker] [launched] [id: {self._worker_thread.native_id}]")
+        LOG.info("[BranchWorker] [launched] [id: %s]", self._worker_thread.native_id)
         self._program.eval(self.env)
-        LOG.info(f"[BranchWorker] [terminated] [id: {self._worker_thread.native_id}]")
+        LOG.info("[BranchWorker] [terminated] [id: %s]", self._worker_thread.native_id)
         self._branch_worker_comm.on_terminated(env=self.env)
 
     def start(self):
@@ -42,14 +42,14 @@ class BranchWorker:
             )
 
         self._worker_thread = threading.Thread(
-            target=self._thread_routine, name=f"BranchWorker_${self._program}"
+            target=self._thread_routine,
+            name=f"BranchWorker_${self._program}",
+            daemon=True,
         )
         TMP_THREADS.append(self._worker_thread)
         self._worker_thread.start()
 
-    def stop(
-        self, stop_date: Timestamp, cause: Optional[str], error: Optional[str]
-    ) -> None:
+    def stop(self, stop_date: Timestamp, cause: str | None, error: str | None) -> None:
         env = self.env
         if env:
             try:

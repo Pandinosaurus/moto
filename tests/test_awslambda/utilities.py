@@ -7,8 +7,9 @@ import boto3
 import pytest
 from botocore.exceptions import ClientError
 
-from moto import mock_aws, settings
+from moto import mock_aws
 
+PYTHON_VERSION = "python3.14"
 _lambda_region = "us-west-2"
 
 
@@ -33,21 +34,16 @@ def lambda_handler(event, context):
 
 
 def get_test_zip_file2():
-    base_url = (
-        "motoserver:5000"
-        if settings.TEST_SERVER_MODE
-        else "ec2.us-west-2.amazonaws.com"
-    )
-    func_str = f"""
+    func_str = """
 import boto3
 
 def lambda_handler(event, context):
-    ec2 = boto3.resource('ec2', region_name='us-west-2', endpoint_url='http://{base_url}')
+    ec2 = boto3.resource('ec2', region_name='us-west-2')
 
     volume_id = event.get('volume_id')
     vol = ec2.Volume(volume_id)
 
-    return {{'id': vol.id, 'state': vol.state, 'size': vol.size}}
+    return {'id': vol.id, 'state': vol.state, 'size': vol.size}
 """
     return _process_lambda(func_str)
 
@@ -170,7 +166,7 @@ def create_invalid_lambda(role):
     with pytest.raises(ClientError) as err:
         conn.create_function(
             FunctionName=function_name,
-            Runtime="python3.11",
+            Runtime=PYTHON_VERSION,
             Role=role,
             Handler="lambda_function.handler",
             Code={"ZipFile": zip_content},
@@ -182,9 +178,9 @@ def create_invalid_lambda(role):
     return err
 
 
-def get_role_name():
+def get_role_name(region=None):
     with mock_aws():
-        iam = boto3.client("iam", region_name=_lambda_region)
+        iam = boto3.client("iam", region_name=region or _lambda_region)
         while True:
             try:
                 return iam.get_role(RoleName="my-role")["Role"]["Arn"]
@@ -222,7 +218,7 @@ def wait_for_log_msg(expected_msg, log_group, wait_time=30):
                 [event["message"] for event in result.get("events")]
             )
         for line in received_messages:
-            if any([msg in line for msg in expected_msgs]):
+            if any(msg in line for msg in expected_msgs):
                 return True, set(received_messages)
         time.sleep(1)
     return False, set(received_messages)

@@ -3,7 +3,7 @@ import string
 import time
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 from urllib.parse import urlparse
 
 import requests
@@ -16,6 +16,7 @@ except ImportError:
     # Only used in < 0.7.x
     # (Also exists in 0.7.0, but throws a warning)
     from openapi_spec_validator import validate_spec as validate  # type: ignore
+
 from openapi_spec_validator.validation.exceptions import OpenAPIValidationError
 
 from moto.apigateway.exceptions import MethodNotFoundException
@@ -23,6 +24,7 @@ from moto.core.base_backend import BackendDict, BaseBackend
 from moto.core.common_models import BaseModel, CloudFormationModel
 from moto.core.utils import path_url
 from moto.moto_api._internal import mock_random as random
+from moto.utilities.utils import ARN_PARTITION_REGEX, get_partition
 
 from ..core.models import responses_mock
 from .exceptions import (
@@ -67,9 +69,22 @@ from .exceptions import (
     ValidationException,
     VpcLinkNotFound,
 )
-from .utils import create_id, to_path
+from .utils import (
+    ApigwApiKeyIdentifier,
+    ApigwAuthorizerIdentifier,
+    ApigwDeploymentIdentifier,
+    ApigwModelIdentifier,
+    ApigwRequestValidatorIdentifier,
+    ApigwResourceIdentifier,
+    ApigwRestApiIdentifier,
+    ApigwUsagePlanIdentifier,
+    ApigwVpcLinkIdentifier,
+    create_id,
+    to_path,
+)
 
 STAGE_URL = "https://{api_id}.execute-api.{region_name}.amazonaws.com/{stage_name}"
+PATCH_OPERATIONS = ["add", "remove", "replace", "move", "copy", "test"]
 
 
 class Deployment(CloudFormationModel):
@@ -79,7 +94,7 @@ class Deployment(CloudFormationModel):
         self.description = description
         self.created_date = int(time.time())
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "stageName": self.stage_name,
@@ -99,7 +114,7 @@ class Deployment(CloudFormationModel):
     def create_from_cloudformation_json(  # type: ignore[misc]
         cls,
         resource_name: str,
-        cloudformation_json: Dict[str, Any],
+        cloudformation_json: dict[str, Any],
         account_id: str,
         region_name: str,
         **kwargs: Any,
@@ -108,7 +123,7 @@ class Deployment(CloudFormationModel):
         rest_api_id = properties["RestApiId"]
         name = properties.get("StageName")
         desc = properties.get("Description", "")
-        backend: "APIGatewayBackend" = apigateway_backends[account_id][region_name]
+        backend: APIGatewayBackend = apigateway_backends[account_id][region_name]
         return backend.create_deployment(
             function_id=rest_api_id, name=name, description=desc
         )
@@ -117,11 +132,11 @@ class Deployment(CloudFormationModel):
 class IntegrationResponse(BaseModel):
     def __init__(
         self,
-        status_code: Union[str, int],
-        selection_pattern: Optional[str] = None,
-        response_templates: Optional[Dict[str, Any]] = None,
-        response_parameters: Optional[Dict[str, str]] = None,
-        content_handling: Optional[Any] = None,
+        status_code: str | int,
+        selection_pattern: str | None = None,
+        response_templates: dict[str, Any] | None = None,
+        response_parameters: dict[str, str] | None = None,
+        content_handling: Any | None = None,
     ):
         if response_templates is None:
             # response_templates = {"application/json": None}  # Note: removed for compatibility with TF
@@ -136,7 +151,7 @@ class IntegrationResponse(BaseModel):
         self.response_parameters = response_parameters
         self.content_handling = content_handling
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         resp = {
             "responseTemplates": self.response_templates,
             "statusCode": self.status_code,
@@ -156,22 +171,22 @@ class Integration(BaseModel):
         integration_type: str,
         uri: str,
         http_method: str,
-        request_templates: Optional[Dict[str, Any]] = None,
-        passthrough_behavior: Optional[str] = "WHEN_NO_MATCH",
-        cache_key_parameters: Optional[List[str]] = None,
-        tls_config: Optional[Dict[str, Any]] = None,
-        cache_namespace: Optional[str] = None,
-        timeout_in_millis: Optional[str] = None,
-        request_parameters: Optional[Dict[str, Any]] = None,
-        content_handling: Optional[str] = None,
-        credentials: Optional[str] = None,
-        connection_type: Optional[str] = None,
+        request_templates: dict[str, Any] | None = None,
+        passthrough_behavior: str | None = "WHEN_NO_MATCH",
+        cache_key_parameters: list[str] | None = None,
+        tls_config: dict[str, Any] | None = None,
+        cache_namespace: str | None = None,
+        timeout_in_millis: str | None = None,
+        request_parameters: dict[str, Any] | None = None,
+        content_handling: str | None = None,
+        credentials: str | None = None,
+        connection_type: str | None = None,
     ):
         self.integration_type = integration_type
         self.uri = uri
         self.http_method = http_method if integration_type != "MOCK" else None
         self.passthrough_behaviour = passthrough_behavior
-        self.cache_key_parameters: List[str] = cache_key_parameters or []
+        self.cache_key_parameters: list[str] = cache_key_parameters or []
         self.request_templates = request_templates
         self.tls_config = tls_config
         self.cache_namespace = cache_namespace
@@ -180,10 +195,10 @@ class Integration(BaseModel):
         self.content_handling = content_handling
         self.credentials = credentials
         self.connection_type = connection_type
-        self.integration_responses: Optional[Dict[str, IntegrationResponse]] = None
+        self.integration_responses: dict[str, IntegrationResponse] | None = None
 
-    def to_json(self) -> Dict[str, Any]:
-        int_responses: Optional[Dict[str, Any]] = None
+    def to_json(self) -> dict[str, Any]:
+        int_responses: dict[str, Any] | None = None
         if self.integration_responses is not None:
             int_responses = {
                 k: v.to_json() for k, v in self.integration_responses.items()
@@ -209,9 +224,9 @@ class Integration(BaseModel):
         self,
         status_code: str,
         selection_pattern: str,
-        response_templates: Dict[str, str],
-        response_parameters: Dict[str, str],
-        content_handling: str,
+        response_templates: dict[str, str],
+        response_parameters: dict[str, str],
+        content_handling: str | None = None,
     ) -> IntegrationResponse:
         integration_response = IntegrationResponse(
             status_code,
@@ -239,14 +254,14 @@ class MethodResponse(BaseModel):
     def __init__(
         self,
         status_code: str,
-        response_models: Dict[str, str],
-        response_parameters: Dict[str, Dict[str, str]],
+        response_models: dict[str, str],
+        response_parameters: dict[str, dict[str, str]],
     ):
         self.status_code = status_code
         self.response_models = response_models
         self.response_parameters = response_parameters
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "statusCode": self.status_code,
             "responseModels": self.response_models,
@@ -255,9 +270,7 @@ class MethodResponse(BaseModel):
 
 
 class Method(CloudFormationModel):
-    def __init__(
-        self, method_type: str, authorization_type: Optional[str], **kwargs: Any
-    ):
+    def __init__(self, method_type: str, authorization_type: str | None, **kwargs: Any):
         self.http_method = method_type
         self.authorization_type = authorization_type
         self.authorizer_id = kwargs.get("authorizer_id")
@@ -265,12 +278,12 @@ class Method(CloudFormationModel):
         self.api_key_required = kwargs.get("api_key_required") or False
         self.request_parameters = kwargs.get("request_parameters")
         self.request_models = kwargs.get("request_models")
-        self.method_integration: Optional[Integration] = None
+        self.method_integration: Integration | None = None
         self.operation_name = kwargs.get("operation_name")
         self.request_validator_id = kwargs.get("request_validator_id")
-        self.method_responses: Dict[str, MethodResponse] = {}
+        self.method_responses: dict[str, MethodResponse] = {}
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "httpMethod": self.http_method,
             "authorizationType": self.authorization_type,
@@ -301,7 +314,7 @@ class Method(CloudFormationModel):
     def create_from_cloudformation_json(  # type: ignore[misc]
         cls,
         resource_name: str,
-        cloudformation_json: Dict[str, Any],
+        cloudformation_json: dict[str, Any],
         account_id: str,
         region_name: str,
         **kwargs: Any,
@@ -336,8 +349,8 @@ class Method(CloudFormationModel):
     def create_response(
         self,
         response_code: str,
-        response_models: Dict[str, str],
-        response_parameters: Dict[str, Dict[str, str]],
+        response_models: dict[str, str],
+        response_parameters: dict[str, dict[str, str]],
     ) -> MethodResponse:
         method_response = MethodResponse(
             response_code, response_models, response_parameters
@@ -345,10 +358,10 @@ class Method(CloudFormationModel):
         self.method_responses[response_code] = method_response
         return method_response
 
-    def get_response(self, response_code: str) -> Optional[MethodResponse]:
+    def get_response(self, response_code: str) -> MethodResponse | None:
         return self.method_responses.get(response_code)
 
-    def delete_response(self, response_code: str) -> Optional[MethodResponse]:
+    def delete_response(self, response_code: str) -> MethodResponse | None:
         return self.method_responses.pop(response_code, None)
 
 
@@ -360,7 +373,7 @@ class Resource(CloudFormationModel):
         region_name: str,
         api_id: str,
         path_part: str,
-        parent_id: Optional[str],
+        parent_id: str | None,
     ):
         self.id = resource_id
         self.account_id = account_id
@@ -368,20 +381,20 @@ class Resource(CloudFormationModel):
         self.api_id = api_id
         self.path_part = path_part
         self.parent_id = parent_id
-        self.resource_methods: Dict[str, Method] = {}
+        self.resource_methods: dict[str, Method] = {}
         from .integration_parsers import IntegrationParser
         from .integration_parsers.aws_parser import TypeAwsParser
         from .integration_parsers.http_parser import TypeHttpParser
         from .integration_parsers.unknown_parser import TypeUnknownParser
 
-        self.integration_parsers: Dict[str, IntegrationParser] = defaultdict(
+        self.integration_parsers: dict[str, IntegrationParser] = defaultdict(
             TypeUnknownParser
         )
         self.integration_parsers["HTTP"] = TypeHttpParser()
         self.integration_parsers["AWS"] = TypeAwsParser()
 
-    def to_dict(self) -> Dict[str, Any]:
-        response: Dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        response: dict[str, Any] = {
             "path": self.get_path(),
             "id": self.id,
         }
@@ -410,7 +423,7 @@ class Resource(CloudFormationModel):
     def create_from_cloudformation_json(  # type: ignore[misc]
         cls,
         resource_name: str,
-        cloudformation_json: Dict[str, Any],
+        cloudformation_json: dict[str, Any],
         account_id: str,
         region_name: str,
         **kwargs: Any,
@@ -448,7 +461,7 @@ class Resource(CloudFormationModel):
 
     def get_response(
         self, request: requests.PreparedRequest
-    ) -> Tuple[int, Union[str, bytes]]:
+    ) -> tuple[int, str | bytes]:
         integration = self.get_integration(str(request.method))
         integration_type = integration.integration_type  # type: ignore[union-attr]
 
@@ -462,12 +475,12 @@ class Resource(CloudFormationModel):
     def add_method(
         self,
         method_type: str,
-        authorization_type: Optional[str],
-        api_key_required: Optional[bool],
+        authorization_type: str | None,
+        api_key_required: bool | None,
         request_parameters: Any = None,
         request_models: Any = None,
-        operation_name: Optional[str] = None,
-        authorizer_id: Optional[str] = None,
+        operation_name: str | None = None,
+        authorizer_id: str | None = None,
         authorization_scopes: Any = None,
         request_validator_id: Any = None,
     ) -> Method:
@@ -501,16 +514,16 @@ class Resource(CloudFormationModel):
         method_type: str,
         integration_type: str,
         uri: str,
-        request_templates: Optional[Dict[str, Any]] = None,
-        passthrough_behavior: Optional[str] = None,
-        integration_method: Optional[str] = None,
-        tls_config: Optional[Dict[str, Any]] = None,
-        cache_namespace: Optional[str] = None,
-        timeout_in_millis: Optional[str] = None,
-        request_parameters: Optional[Dict[str, Any]] = None,
-        content_handling: Optional[str] = None,
-        credentials: Optional[str] = None,
-        connection_type: Optional[str] = None,
+        request_templates: dict[str, Any] | None = None,
+        passthrough_behavior: str | None = None,
+        integration_method: str | None = None,
+        tls_config: dict[str, Any] | None = None,
+        cache_namespace: str | None = None,
+        timeout_in_millis: str | None = None,
+        request_parameters: dict[str, Any] | None = None,
+        content_handling: str | None = None,
+        credentials: str | None = None,
+        connection_type: str | None = None,
     ) -> Integration:
         integration_method = integration_method or method_type
         integration = Integration(
@@ -530,7 +543,7 @@ class Resource(CloudFormationModel):
         self.resource_methods[method_type].method_integration = integration
         return integration
 
-    def get_integration(self, method_type: str) -> Optional[Integration]:
+    def get_integration(self, method_type: str) -> Integration | None:
         method = self.resource_methods.get(method_type)
         return method.method_integration if method else None
 
@@ -543,9 +556,9 @@ class Resource(CloudFormationModel):
 class Authorizer(BaseModel):
     def __init__(
         self,
-        authorizer_id: Optional[str],
-        name: Optional[str],
-        authorizer_type: Optional[str],
+        authorizer_id: str | None,
+        name: str | None,
+        authorizer_type: str | None,
         **kwargs: Any,
     ):
         self.id = authorizer_id
@@ -561,7 +574,7 @@ class Authorizer(BaseModel):
         )
         self.authorizer_result_ttl = kwargs.get("authorizer_result_ttl")
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         dct = {
             "id": self.id,
             "name": self.name,
@@ -582,7 +595,7 @@ class Authorizer(BaseModel):
             dct["identityValidationExpression"] = self.identity_validation_expression
         return dct
 
-    def apply_operations(self, patch_operations: List[Dict[str, Any]]) -> "Authorizer":
+    def apply_operations(self, patch_operations: list[dict[str, Any]]) -> "Authorizer":
         for op in patch_operations:
             if "/authorizerUri" in op["path"]:
                 self.authorizer_uri = op["value"]
@@ -613,18 +626,18 @@ class Authorizer(BaseModel):
 class Stage(BaseModel):
     def __init__(
         self,
-        name: Optional[str] = None,
-        deployment_id: Optional[str] = None,
-        variables: Optional[Dict[str, Any]] = None,
+        name: str | None = None,
+        deployment_id: str | None = None,
+        variables: dict[str, Any] | None = None,
         description: str = "",
-        cacheClusterEnabled: Optional[bool] = False,
-        cacheClusterSize: Optional[str] = None,
-        tags: Optional[Dict[str, str]] = None,
-        tracing_enabled: Optional[bool] = None,
+        cacheClusterEnabled: bool | None = False,
+        cacheClusterSize: str | None = None,
+        tags: dict[str, str] | None = None,
+        tracing_enabled: bool | None = None,
     ):
         self.name = name
         self.deployment_id = deployment_id
-        self.method_settings: Dict[str, Any] = {}
+        self.method_settings: dict[str, Any] = {}
         self.variables = variables or {}
         self.description = description
         self.cache_cluster_enabled = cacheClusterEnabled
@@ -634,11 +647,11 @@ class Stage(BaseModel):
         )
         self.tags = tags
         self.tracing_enabled = tracing_enabled
-        self.access_log_settings: Optional[Dict[str, Any]] = None
-        self.web_acl_arn: Optional[str] = None
+        self.access_log_settings: dict[str, Any] | None = None
+        self.web_acl_arn: str | None = None
 
-    def to_json(self) -> Dict[str, Any]:
-        dct: Dict[str, Any] = {
+    def to_json(self) -> dict[str, Any]:
+        dct: dict[str, Any] = {
             "stageName": self.name,
             "deploymentId": self.deployment_id,
             "methodSettings": self.method_settings,
@@ -662,7 +675,7 @@ class Stage(BaseModel):
             dct["webAclArn"] = self.web_acl_arn
         return dct
 
-    def apply_operations(self, patch_operations: List[Dict[str, Any]]) -> "Stage":
+    def apply_operations(self, patch_operations: list[dict[str, Any]]) -> "Stage":
         for op in patch_operations:
             if "variables/" in op["path"]:
                 self._apply_operation_to_variables(op)
@@ -714,7 +727,7 @@ class Stage(BaseModel):
                 self._convert_to_type(updated_key, value)
             )
 
-    def _get_default_method_settings(self) -> Dict[str, Any]:
+    def _get_default_method_settings(self) -> dict[str, Any]:
         return {
             "throttlingRateLimit": 1000.0,
             "dataTraceEnabled": False,
@@ -727,7 +740,7 @@ class Stage(BaseModel):
             "requireAuthorizationForCacheControl": True,
         }
 
-    def _method_settings_translations(self, key: str) -> Optional[str]:
+    def _method_settings_translations(self, key: str) -> str | None:
         mappings = {
             "metrics/enabled": "metricsEnabled",
             "logging/loglevel": "loggingLevel",
@@ -746,7 +759,7 @@ class Stage(BaseModel):
     def _str2bool(self, v: str) -> bool:
         return v.lower() == "true"
 
-    def _convert_to_type(self, key: str, val: str) -> Union[str, int, float]:
+    def _convert_to_type(self, key: str, val: str) -> str | int | float:
         type_mappings = {
             "metricsEnabled": "bool",
             "loggingLevel": "str",
@@ -774,7 +787,7 @@ class Stage(BaseModel):
         else:
             return str(val)
 
-    def _apply_operation_to_variables(self, op: Dict[str, Any]) -> None:
+    def _apply_operation_to_variables(self, op: dict[str, Any]) -> None:
         key = op["path"][op["path"].rindex("variables/") + 10 :]
         if op["op"] == "remove":
             self.variables.pop(key, None)
@@ -787,16 +800,17 @@ class Stage(BaseModel):
 class ApiKey(BaseModel):
     def __init__(
         self,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
+        api_key_id: str,
+        name: str | None = None,
+        description: str | None = None,
         enabled: bool = False,
-        generateDistinctId: bool = False,  # pylint: disable=unused-argument
-        value: Optional[str] = None,
-        stageKeys: Optional[Any] = None,
-        tags: Optional[List[Dict[str, str]]] = None,
-        customerId: Optional[str] = None,
+        generateDistinctId: bool = False,
+        value: str | None = None,
+        stageKeys: Any | None = None,
+        tags: list[dict[str, str]] | None = None,
+        customerId: str | None = None,
     ):
-        self.id = create_id()
+        self.id = api_key_id
         self.value = value or "".join(
             random.sample(string.ascii_letters + string.digits, 40)
         )
@@ -808,7 +822,7 @@ class ApiKey(BaseModel):
         self.stage_keys = stageKeys or []
         self.tags = tags
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "value": self.value,
@@ -822,7 +836,7 @@ class ApiKey(BaseModel):
             "tags": self.tags,
         }
 
-    def update_operations(self, patch_operations: List[Dict[str, Any]]) -> "ApiKey":
+    def update_operations(self, patch_operations: list[dict[str, Any]]) -> "ApiKey":
         for op in patch_operations:
             if op["op"] == "replace":
                 if "/name" in op["path"]:
@@ -844,15 +858,16 @@ class ApiKey(BaseModel):
 class UsagePlan(BaseModel):
     def __init__(
         self,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
+        usage_plan_id: str,
+        name: str | None = None,
+        description: str | None = None,
         apiStages: Any = None,
-        throttle: Optional[Dict[str, Any]] = None,
-        quota: Optional[Dict[str, Any]] = None,
-        productCode: Optional[str] = None,
-        tags: Optional[List[Dict[str, str]]] = None,
+        throttle: dict[str, Any] | None = None,
+        quota: dict[str, Any] | None = None,
+        productCode: str | None = None,
+        tags: list[dict[str, str]] | None = None,
     ):
-        self.id = create_id()
+        self.id = usage_plan_id
         self.name = name
         self.description = description
         self.api_stages = apiStages or []
@@ -861,7 +876,7 @@ class UsagePlan(BaseModel):
         self.product_code = productCode
         self.tags = tags
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         resp = {
             "id": self.id,
             "name": self.name,
@@ -876,7 +891,7 @@ class UsagePlan(BaseModel):
             resp["quota"] = self.quota
         return resp
 
-    def apply_patch_operations(self, patch_operations: List[Dict[str, Any]]) -> None:
+    def apply_patch_operations(self, patch_operations: list[dict[str, Any]]) -> None:
         for op in patch_operations:
             path = op["path"]
             if op["op"] == "add":
@@ -935,7 +950,7 @@ class RequestValidator(BaseModel):
         self,
         _id: str,
         name: str,
-        validateRequestBody: Optional[bool],
+        validateRequestBody: bool | None,
         validateRequestParameters: Any,
     ):
         self.id = _id
@@ -943,7 +958,7 @@ class RequestValidator(BaseModel):
         self.validate_request_body = validateRequestBody
         self.validate_request_parameters = validateRequestParameters
 
-    def apply_patch_operations(self, operations: List[Dict[str, Any]]) -> None:
+    def apply_patch_operations(self, operations: list[dict[str, Any]]) -> None:
         for operation in operations:
             path = operation[RequestValidator.OP_PATH]
             value = operation[RequestValidator.OP_VALUE]
@@ -955,7 +970,7 @@ class RequestValidator(BaseModel):
                 if to_path(RequestValidator.PROP_VALIDATE_REQUEST_PARAMETERS) in path:
                     self.validate_request_parameters = value.lower() in ("true")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             RequestValidator.PROP_ID: self.id,
             RequestValidator.PROP_NAME: self.name,
@@ -965,13 +980,13 @@ class RequestValidator(BaseModel):
 
 
 class UsagePlanKey(BaseModel):
-    def __init__(self, plan_id: str, plan_type: str, name: Optional[str], value: str):
+    def __init__(self, plan_id: str, plan_type: str, name: str | None, value: str):
         self.id = plan_id
         self.name = name
         self.type = plan_type
         self.value = value
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "name": self.name,
@@ -983,19 +998,20 @@ class UsagePlanKey(BaseModel):
 class VpcLink(BaseModel):
     def __init__(
         self,
+        vpc_link_id: str,
         name: str,
         description: str,
-        target_arns: List[str],
-        tags: List[Dict[str, str]],
+        target_arns: list[str],
+        tags: list[dict[str, str]],
     ):
-        self.id = create_id()
+        self.id = vpc_link_id
         self.name = name
         self.description = description
         self.target_arns = target_arns
         self.tags = tags
         self.status = "AVAILABLE"
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "name": self.name,
@@ -1019,6 +1035,7 @@ class RestAPI(CloudFormationModel):
     PROP_POLICY = "policy"
     PROP_DISABLE_EXECUTE_API_ENDPOINT = "disableExecuteApiEndpoint"
     PROP_MINIMUM_COMPRESSION_SIZE = "minimumCompressionSize"
+    PROP_ROOT_RESOURCE_ID = "rootResourceId"
 
     # operations
     OPERATION_ADD = "add"
@@ -1055,19 +1072,20 @@ class RestAPI(CloudFormationModel):
             kwargs.get("disable_execute_api_endpoint") or False
         )
         self.minimum_compression_size = kwargs.get("minimum_compression_size")
-        self.deployments: Dict[str, Deployment] = {}
-        self.authorizers: Dict[str, Authorizer] = {}
-        self.gateway_responses: Dict[str, GatewayResponse] = {}
-        self.stages: Dict[str, Stage] = {}
-        self.resources: Dict[str, Resource] = {}
-        self.models: Dict[str, Model] = {}
-        self.request_validators: Dict[str, RequestValidator] = {}
+        self.deployments: dict[str, Deployment] = {}
+        self.authorizers: dict[str, Authorizer] = {}
+        self.gateway_responses: dict[str, GatewayResponse] = {}
+        self.stages: dict[str, Stage] = {}
+        self.resources: dict[str, Resource] = {}
+        self.models: dict[str, Model] = {}
+        self.request_validators: dict[str, RequestValidator] = {}
         self.default = self.add_child("/")  # Add default child
+        self.root_resource_id = self.default.id
 
     def __repr__(self) -> str:
         return str(self.id)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             self.PROP_ID: self.id,
             self.PROP_NAME: self.name,
@@ -1081,15 +1099,17 @@ class RestAPI(CloudFormationModel):
             self.PROP_POLICY: self.policy,
             self.PROP_DISABLE_EXECUTE_API_ENDPOINT: self.disableExecuteApiEndpoint,
             self.PROP_MINIMUM_COMPRESSION_SIZE: self.minimum_compression_size,
+            self.PROP_ROOT_RESOURCE_ID: self.root_resource_id,
         }
 
-    def apply_patch_operations(self, patch_operations: List[Dict[str, Any]]) -> None:
+    def apply_patch_operations(self, patch_operations: list[dict[str, Any]]) -> None:
         for op in patch_operations:
             path = op[self.OPERATION_PATH]
             value = ""
             if self.OPERATION_VALUE in op:
                 value = op[self.OPERATION_VALUE]
             operaton = op[self.OPERATION_OP]
+
             if operaton == self.OPERATION_REPLACE:
                 if to_path(self.PROP_NAME) in path:
                     self.name = value
@@ -1103,6 +1123,9 @@ class RestAPI(CloudFormationModel):
                     self.disableExecuteApiEndpoint = bool(value)
                 if to_path(self.PROP_POLICY) in path:
                     self.policy = value
+                if to_path(self.PROP_ENDPOINT_CONFIGURATION) in path:
+                    self.endpoint_configuration["types"] = [value]
+
             elif operaton == self.OPERATION_ADD:
                 if to_path(self.PROP_BINARY_MEDIA_TYPES) in path:
                     self.binaryMediaTypes.append(value)
@@ -1142,7 +1165,7 @@ class RestAPI(CloudFormationModel):
     def create_from_cloudformation_json(  # type: ignore[misc]
         cls,
         resource_name: str,
-        cloudformation_json: Dict[str, Any],
+        cloudformation_json: dict[str, Any],
         account_id: str,
         region_name: str,
         **kwargs: Any,
@@ -1156,8 +1179,10 @@ class RestAPI(CloudFormationModel):
             name=name, description=desc, endpoint_configuration=config
         )
 
-    def add_child(self, path: str, parent_id: Optional[str] = None) -> Resource:
-        child_id = create_id()
+    def add_child(self, path: str, parent_id: str | None = None) -> Resource:
+        child_id = ApigwResourceIdentifier(
+            self.account_id, self.region_name, parent_id or "", path
+        ).generate()
         child = Resource(
             resource_id=child_id,
             account_id=self.account_id,
@@ -1176,7 +1201,9 @@ class RestAPI(CloudFormationModel):
         schema: str,
         content_type: str,
     ) -> "Model":
-        model_id = create_id()
+        model_id = ApigwModelIdentifier(
+            self.account_id, self.region_name, name
+        ).generate()
         new_model = Model(
             model_id=model_id,
             name=name,
@@ -1196,7 +1223,7 @@ class RestAPI(CloudFormationModel):
 
     def resource_callback(
         self, request: Any
-    ) -> Tuple[int, Dict[str, str], Union[str, bytes]]:
+    ) -> tuple[int, dict[str, str], str | bytes]:
         path = path_url(request.url)
         path_after_stage_name = "/" + "/".join(path.split("/")[2:])
 
@@ -1231,13 +1258,13 @@ class RestAPI(CloudFormationModel):
         authorizer_id: str,
         name: str,
         authorizer_type: str,
-        provider_arns: Optional[List[str]],
-        auth_type: Optional[str],
-        authorizer_uri: Optional[str],
-        authorizer_credentials: Optional[str],
-        identity_source: Optional[str],
-        identiy_validation_expression: Optional[str],
-        authorizer_result_ttl: Optional[int],
+        provider_arns: list[str] | None,
+        auth_type: str | None,
+        authorizer_uri: str | None,
+        authorizer_credentials: str | None,
+        identity_source: str | None,
+        identiy_validation_expression: str | None,
+        authorizer_result_ttl: int | None,
     ) -> Authorizer:
         authorizer = Authorizer(
             authorizer_id=authorizer_id,
@@ -1260,10 +1287,10 @@ class RestAPI(CloudFormationModel):
         deployment_id: str,
         variables: Any,
         description: str,
-        cacheClusterEnabled: Optional[bool],
-        cacheClusterSize: Optional[str],
-        tags: Optional[Dict[str, str]],
-        tracing_enabled: Optional[bool],
+        cacheClusterEnabled: bool | None,
+        cacheClusterSize: str | None,
+        tags: dict[str, str] | None,
+        tracing_enabled: bool | None,
     ) -> Stage:
         if name in self.stages:
             raise ConflictException("Stage already exists")
@@ -1288,7 +1315,11 @@ class RestAPI(CloudFormationModel):
     ) -> Deployment:
         if stage_variables is None:
             stage_variables = {}
-        deployment_id = create_id()
+        # Since there are no unique values to a deployment, we will use the stage name for the deployment.
+        # We are also passing a list of deployment ids to generate to prevent overwriting deployments.
+        deployment_id = ApigwDeploymentIdentifier(
+            self.account_id, self.region_name, stage_name=name
+        ).generate(list(self.deployments.keys()))
         deployment = Deployment(deployment_id, name, description)
         self.deployments[deployment_id] = deployment
         if name:
@@ -1302,13 +1333,13 @@ class RestAPI(CloudFormationModel):
     def get_deployment(self, deployment_id: str) -> Deployment:
         return self.deployments[deployment_id]
 
-    def get_authorizers(self) -> List[Authorizer]:
+    def get_authorizers(self) -> list[Authorizer]:
         return list(self.authorizers.values())
 
-    def get_stages(self) -> List[Stage]:
+    def get_stages(self) -> list[Stage]:
         return list(self.stages.values())
 
-    def get_deployments(self) -> List[Deployment]:
+    def get_deployments(self) -> list[Deployment]:
         return list(self.deployments.values())
 
     def delete_deployment(self, deployment_id: str) -> Deployment:
@@ -1324,10 +1355,12 @@ class RestAPI(CloudFormationModel):
     def create_request_validator(
         self,
         name: str,
-        validateRequestBody: Optional[bool],
+        validateRequestBody: bool | None,
         validateRequestParameters: Any,
     ) -> RequestValidator:
-        validator_id = create_id()
+        validator_id = ApigwRequestValidatorIdentifier(
+            self.account_id, self.region_name, name
+        ).generate()
         request_validator = RequestValidator(
             _id=validator_id,
             name=name,
@@ -1337,7 +1370,7 @@ class RestAPI(CloudFormationModel):
         self.request_validators[validator_id] = request_validator
         return request_validator
 
-    def get_request_validators(self) -> List[RequestValidator]:
+    def get_request_validators(self) -> list[RequestValidator]:
         return list(self.request_validators.values())
 
     def get_request_validator(self, validator_id: str) -> RequestValidator:
@@ -1350,7 +1383,7 @@ class RestAPI(CloudFormationModel):
         return self.request_validators.pop(validator_id)
 
     def update_request_validator(
-        self, validator_id: str, patch_operations: List[Dict[str, Any]]
+        self, validator_id: str, patch_operations: list[dict[str, Any]]
     ) -> RequestValidator:
         self.request_validators[validator_id].apply_patch_operations(patch_operations)
         return self.request_validators[validator_id]
@@ -1359,8 +1392,8 @@ class RestAPI(CloudFormationModel):
         self,
         response_type: str,
         status_code: int,
-        response_parameters: Dict[str, Any],
-        response_templates: Dict[str, str],
+        response_parameters: dict[str, Any],
+        response_templates: dict[str, str],
     ) -> "GatewayResponse":
         response = GatewayResponse(
             response_type=response_type,
@@ -1376,7 +1409,7 @@ class RestAPI(CloudFormationModel):
             raise GatewayResponseNotFound()
         return self.gateway_responses[response_type]
 
-    def get_gateway_responses(self) -> List["GatewayResponse"]:
+    def get_gateway_responses(self) -> list["GatewayResponse"]:
         return list(self.gateway_responses.values())
 
     def delete_gateway_response(self, response_type: str) -> None:
@@ -1407,7 +1440,7 @@ class DomainName(BaseModel):
         self.regional_certificate_arn = kwargs.get("regional_certificate_arn")
         self.endpoint_configuration = kwargs.get("endpoint_configuration")
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         dct = {
             "domainName": self.domain_name,
             "regionalDomainName": self.regional_domain_name,
@@ -1449,7 +1482,7 @@ class Model(BaseModel):
         self.schema = kwargs.get("schema")
         self.content_type = kwargs.get("content_type")
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         dct = {
             "id": self.id,
             "name": self.name,
@@ -1476,7 +1509,7 @@ class BasePathMapping(BaseModel):
         self.base_path = kwargs.get("basePath") or "(none)"
         self.stage = kwargs.get("stage")
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         dct = {
             "domain_name": self.domain_name,
             "restApiId": self.rest_api_id,
@@ -1486,7 +1519,7 @@ class BasePathMapping(BaseModel):
             dct["stage"] = self.stage
         return dct
 
-    def apply_patch_operations(self, patch_operations: List[Dict[str, Any]]) -> None:
+    def apply_patch_operations(self, patch_operations: list[dict[str, Any]]) -> None:
         for op in patch_operations:
             path = op["path"]
             value = op["value"]
@@ -1505,8 +1538,8 @@ class GatewayResponse(BaseModel):
         self,
         response_type: str,
         status_code: int,
-        response_parameters: Dict[str, Any],
-        response_templates: Dict[str, str],
+        response_parameters: dict[str, Any],
+        response_templates: dict[str, str],
     ):
         self.response_type = response_type
         self.default_response = False
@@ -1514,7 +1547,7 @@ class GatewayResponse(BaseModel):
         self.response_parameters = response_parameters
         self.response_templates = response_templates
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         dct = {
             "responseType": self.response_type,
             "defaultResponse": self.default_response,
@@ -1526,6 +1559,54 @@ class GatewayResponse(BaseModel):
         if self.response_templates is not None:
             dct["responseTemplates"] = self.response_templates
         return dct
+
+
+class Account(BaseModel):
+    def __init__(self) -> None:
+        self.cloudwatch_role_arn: str | None = None
+        self.throttle_settings: dict[str, Any] = {
+            "burstLimit": 5000,
+            "rateLimit": 10000.0,
+        }
+        self.features: list[str] | None = None
+        self.api_key_version: str = "1"
+
+    def apply_patch_operations(
+        self, patch_operations: list[dict[str, Any]]
+    ) -> "Account":
+        for op in patch_operations:
+            if "/cloudwatchRoleArn" in op["path"]:
+                self.cloudwatch_role_arn = op["value"]
+            elif "/features" in op["path"]:
+                if op["op"] == "add":
+                    if self.features is None:
+                        self.features = [op["value"]]
+                    else:
+                        self.features.append(op["value"])
+                elif op["op"] == "remove":
+                    if op["value"] == "UsagePlans":
+                        raise BadRequestException(
+                            "Usage Plans cannot be disabled once enabled"
+                        )
+                    if self.features is not None:
+                        self.features.remove(op["value"])
+                else:
+                    raise NotImplementedError(
+                        f'Patch operation "{op["op"]}" for "/features" not implemented'
+                    )
+            else:
+                raise NotImplementedError(
+                    f'Patch operation "{op["op"]}" for "{op["path"]}" not implemented'
+                )
+        return self
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "cloudwatchRoleArn": self.cloudwatch_role_arn,
+            "throttleSettings": self.throttle_settings,
+            "features": self.features,
+            "apiKeyVersion": self.api_key_version,
+        }
 
 
 class APIGatewayBackend(BaseBackend):
@@ -1557,27 +1638,30 @@ class APIGatewayBackend(BaseBackend):
 
     def __init__(self, region_name: str, account_id: str):
         super().__init__(region_name, account_id)
-        self.apis: Dict[str, RestAPI] = {}
-        self.keys: Dict[str, ApiKey] = {}
-        self.usage_plans: Dict[str, UsagePlan] = {}
-        self.usage_plan_keys: Dict[str, Dict[str, UsagePlanKey]] = {}
-        self.domain_names: Dict[str, DomainName] = {}
-        self.models: Dict[str, Model] = {}
-        self.base_path_mappings: Dict[str, Dict[str, BasePathMapping]] = {}
-        self.vpc_links: Dict[str, VpcLink] = {}
+        self.account: Account = Account()
+        self.apis: dict[str, RestAPI] = {}
+        self.keys: dict[str, ApiKey] = {}
+        self.usage_plans: dict[str, UsagePlan] = {}
+        self.usage_plan_keys: dict[str, dict[str, UsagePlanKey]] = {}
+        self.domain_names: dict[str, DomainName] = {}
+        self.models: dict[str, Model] = {}
+        self.base_path_mappings: dict[str, dict[str, BasePathMapping]] = {}
+        self.vpc_links: dict[str, VpcLink] = {}
 
     def create_rest_api(
         self,
         name: str,
         description: str,
-        api_key_source: Optional[str] = None,
-        endpoint_configuration: Optional[str] = None,
-        tags: Optional[List[Dict[str, str]]] = None,
-        policy: Optional[str] = None,
-        minimum_compression_size: Optional[int] = None,
-        disable_execute_api_endpoint: Optional[bool] = None,
+        api_key_source: str | None = None,
+        endpoint_configuration: str | None = None,
+        tags: list[dict[str, str]] | None = None,
+        policy: str | None = None,
+        minimum_compression_size: int | None = None,
+        disable_execute_api_endpoint: bool | None = None,
     ) -> RestAPI:
-        api_id = create_id()
+        api_id = ApigwRestApiIdentifier(
+            self.account_id, self.region_name, name
+        ).generate(tags=tags)
         rest_api = RestAPI(
             api_id,
             self.account_id,
@@ -1595,7 +1679,7 @@ class APIGatewayBackend(BaseBackend):
         return rest_api
 
     def import_rest_api(
-        self, api_doc: Dict[str, Any], fail_on_warnings: bool
+        self, api_doc: dict[str, Any], fail_on_warnings: bool
     ) -> RestAPI:
         """
         Only a subset of the OpenAPI spec 3.x is currently implemented.
@@ -1611,7 +1695,7 @@ class APIGatewayBackend(BaseBackend):
         self.put_rest_api(api.id, api_doc, fail_on_warnings=fail_on_warnings)
         return api
 
-    def export_api(self, rest_api_id: str, export_type: str) -> Dict[str, Any]:
+    def export_api(self, rest_api_id: str, export_type: str) -> dict[str, Any]:
         """
         Not all fields are implemented yet.
         The export-type is currently ignored - we will only return the 'swagger'-format
@@ -1623,7 +1707,7 @@ class APIGatewayBackend(BaseBackend):
         if export_type not in ["swagger", "oas30"]:
             raise BadRequestException(f"No API exporter for type '{export_type}'")
         now = datetime.now().strftime("%Y-%m-%dT%H:%m:%S")
-        resp: Dict[str, Any] = {
+        resp: dict[str, Any] = {
             "swagger": "2.0",
             "info": {"version": now, "title": api.name},
             "host": f"{api.id}.execute-api.{self.region_name}.amazonaws.com",
@@ -1656,7 +1740,7 @@ class APIGatewayBackend(BaseBackend):
     def put_rest_api(
         self,
         function_id: str,
-        api_doc: Dict[str, Any],
+        api_doc: dict[str, Any],
         fail_on_warnings: bool,
         mode: str = "merge",
     ) -> RestAPI:
@@ -1716,23 +1800,46 @@ class APIGatewayBackend(BaseBackend):
 
             for method_type, method_doc in resource_doc.items():
                 method_type = method_type.upper()
-                if method_doc.get("x-amazon-apigateway-integration") is None:
-                    self.put_method(function_id, resource.id, method_type, None)
-                    method_responses = method_doc.get("responses", {}).items()
-                    for response_code, _ in method_responses:
-                        self.put_method_response(
-                            function_id,
-                            resource.id,
-                            method_type,
-                            response_code,
-                            response_models=None,
-                            response_parameters=None,
+                self.put_method(function_id, resource.id, method_type, None)
+                method_responses = method_doc.get("responses", {}).items()
+                for response_code, _ in method_responses:
+                    self.put_method_response(
+                        function_id,
+                        resource.id,
+                        method_type,
+                        response_code,
+                        response_models=None,
+                        response_parameters=None,
+                    )
+
+                # Add integration if defined
+                if method_doc.get("x-amazon-apigateway-integration"):
+                    integration = method_doc.get("x-amazon-apigateway-integration")
+                    integration_args = self._build_integration_args(integration)
+
+                    self.put_integration(
+                        function_id=function_id,
+                        resource_id=resource.id,
+                        method_type=method_type,
+                        **{k: v for k, v in integration_args.items() if v is not None},
+                    )
+
+                    responses_args = self._build_integration_responses_args(integration)
+
+                    for response in responses_args:
+                        kwargs = {k: v for k, v in response.items() if v is not None}
+
+                        self.put_integration_response(
+                            function_id=function_id,
+                            resource_id=resource.id,
+                            method_type=method_type,
+                            **kwargs,
                         )
 
         return self.get_rest_api(function_id)
 
     def update_rest_api(
-        self, function_id: str, patch_operations: List[Dict[str, Any]]
+        self, function_id: str, patch_operations: list[dict[str, Any]]
     ) -> RestAPI:
         rest_api = self.apis.get(function_id)
         if rest_api is None:
@@ -1740,14 +1847,14 @@ class APIGatewayBackend(BaseBackend):
         self.apis[function_id].apply_patch_operations(patch_operations)
         return self.apis[function_id]
 
-    def list_apis(self) -> List[RestAPI]:
+    def list_apis(self) -> list[RestAPI]:
         return list(self.apis.values())
 
     def delete_rest_api(self, function_id: str) -> RestAPI:
         rest_api = self.apis.pop(function_id)
         return rest_api
 
-    def get_resources(self, function_id: str) -> List[Resource]:
+    def get_resources(self, function_id: str) -> list[Resource]:
         api = self.get_rest_api(function_id)
         return list(api.resources.values())
 
@@ -1783,14 +1890,14 @@ class APIGatewayBackend(BaseBackend):
         function_id: str,
         resource_id: str,
         method_type: str,
-        authorization_type: Optional[str],
-        api_key_required: Optional[bool] = None,
-        request_parameters: Optional[Dict[str, Any]] = None,
-        request_models: Optional[Dict[str, Any]] = None,
-        operation_name: Optional[str] = None,
-        authorizer_id: Optional[str] = None,
-        authorization_scopes: Optional[str] = None,
-        request_validator_id: Optional[str] = None,
+        authorization_type: str | None,
+        api_key_required: bool | None = None,
+        request_parameters: dict[str, Any] | None = None,
+        request_models: dict[str, Any] | None = None,
+        operation_name: str | None = None,
+        authorizer_id: str | None = None,
+        authorization_scopes: str | None = None,
+        request_validator_id: str | None = None,
     ) -> Method:
         resource = self.get_resource(function_id, resource_id)
         method = resource.add_method(
@@ -1820,7 +1927,7 @@ class APIGatewayBackend(BaseBackend):
         else:
             return authorizer
 
-    def get_authorizers(self, restapi_id: str) -> List[Authorizer]:
+    def get_authorizers(self, restapi_id: str) -> list[Authorizer]:
         api = self.get_rest_api(restapi_id)
         return api.get_authorizers()
 
@@ -1828,7 +1935,9 @@ class APIGatewayBackend(BaseBackend):
         self, restapi_id: str, name: str, authorizer_type: str, **kwargs: Any
     ) -> Authorizer:
         api = self.get_rest_api(restapi_id)
-        authorizer_id = create_id()
+        authorizer_id = ApigwAuthorizerIdentifier(
+            self.account_id, self.region_name, name
+        ).generate()
         return api.create_authorizer(
             authorizer_id,
             name,
@@ -1859,7 +1968,7 @@ class APIGatewayBackend(BaseBackend):
             raise StageNotFoundException()
         return stage
 
-    def get_stages(self, function_id: str) -> List[Stage]:
+    def get_stages(self, function_id: str) -> list[Stage]:
         api = self.get_rest_api(function_id)
         return api.get_stages()
 
@@ -1868,12 +1977,12 @@ class APIGatewayBackend(BaseBackend):
         function_id: str,
         stage_name: str,
         deploymentId: str,
-        variables: Optional[Any] = None,
+        variables: Any | None = None,
         description: str = "",
-        cacheClusterEnabled: Optional[bool] = None,
-        cacheClusterSize: Optional[str] = None,
-        tags: Optional[Dict[str, str]] = None,
-        tracing_enabled: Optional[bool] = None,
+        cacheClusterEnabled: bool | None = None,
+        cacheClusterSize: str | None = None,
+        tags: dict[str, str] | None = None,
+        tracing_enabled: bool | None = None,
     ) -> Stage:
         if variables is None:
             variables = {}
@@ -1906,7 +2015,7 @@ class APIGatewayBackend(BaseBackend):
 
     def get_method_response(
         self, function_id: str, resource_id: str, method_type: str, response_code: str
-    ) -> Optional[MethodResponse]:
+    ) -> MethodResponse | None:
         method = self.get_method(function_id, resource_id, method_type)
         return method.get_response(response_code)
 
@@ -1926,7 +2035,7 @@ class APIGatewayBackend(BaseBackend):
 
     def delete_method_response(
         self, function_id: str, resource_id: str, method_type: str, response_code: str
-    ) -> Optional[MethodResponse]:
+    ) -> MethodResponse | None:
         method = self.get_method(function_id, resource_id, method_type)
         return method.delete_response(response_code)
 
@@ -1938,19 +2047,20 @@ class APIGatewayBackend(BaseBackend):
         integration_type: str,
         uri: str,
         integration_method: str,
-        credentials: Optional[str] = None,
-        request_templates: Optional[Dict[str, Any]] = None,
-        passthrough_behavior: Optional[str] = None,
-        tls_config: Optional[Dict[str, Any]] = None,
-        cache_namespace: Optional[str] = None,
-        timeout_in_millis: Optional[str] = None,
-        request_parameters: Optional[Dict[str, Any]] = None,
-        content_handling: Optional[str] = None,
-        connection_type: Optional[str] = None,
+        credentials: str | None = None,
+        request_templates: dict[str, Any] | None = None,
+        passthrough_behavior: str | None = None,
+        tls_config: dict[str, Any] | None = None,
+        cache_namespace: str | None = None,
+        timeout_in_millis: str | None = None,
+        request_parameters: dict[str, Any] | None = None,
+        content_handling: str | None = None,
+        connection_type: str | None = None,
     ) -> Integration:
         resource = self.get_resource(function_id, resource_id)
         if credentials and not re.match(
-            "^arn:aws:iam::" + str(self.account_id), credentials
+            f"^arn:{get_partition(self.region_name)}:iam::" + str(self.account_id),
+            credentials,
         ):
             raise CrossAccountNotAllowed()
         if not integration_method and integration_type in [
@@ -1961,21 +2071,25 @@ class APIGatewayBackend(BaseBackend):
         ]:
             raise IntegrationMethodNotDefined()
         if integration_type in ["AWS_PROXY"] and re.match(
-            "^arn:aws:apigateway:[a-zA-Z0-9-]+:s3", uri
+            ARN_PARTITION_REGEX + ":apigateway:[a-zA-Z0-9-]+:s3", uri
         ):
             raise AwsProxyNotAllowed()
         if (
             integration_type in ["AWS"]
-            and re.match("^arn:aws:apigateway:[a-zA-Z0-9-]+:s3", uri)
+            and re.match(ARN_PARTITION_REGEX + ":apigateway:[a-zA-Z0-9-]+:s3", uri)
             and not credentials
         ):
             raise RoleNotSpecified()
         if integration_type in ["HTTP", "HTTP_PROXY"] and not self._uri_validator(uri):
             raise InvalidHttpEndpoint()
-        if integration_type in ["AWS", "AWS_PROXY"] and not re.match("^arn:aws:", uri):
+        if integration_type in ["AWS", "AWS_PROXY"] and not re.match(
+            ARN_PARTITION_REGEX + ":", uri
+        ):
             raise InvalidArn()
         if integration_type in ["AWS", "AWS_PROXY"] and not re.match(
-            "^arn:aws:apigateway:[a-zA-Z0-9-]+:[a-zA-Z0-9-.]+:(path|action)/", uri
+            ARN_PARTITION_REGEX
+            + ":apigateway:[a-zA-Z0-9-]+:[a-zA-Z0-9-.]+:(path|action)/",
+            uri,
         ):
             raise InvalidIntegrationArn()
         integration = resource.add_integration(
@@ -2014,9 +2128,9 @@ class APIGatewayBackend(BaseBackend):
         method_type: str,
         status_code: str,
         selection_pattern: str,
-        response_templates: Dict[str, str],
-        response_parameters: Dict[str, str],
-        content_handling: str,
+        response_templates: dict[str, str],
+        response_parameters: dict[str, str],
+        content_handling: str | None = None,
     ) -> IntegrationResponse:
         integration = self.get_integration(function_id, resource_id, method_type)
         if integration:
@@ -2072,7 +2186,7 @@ class APIGatewayBackend(BaseBackend):
         api = self.get_rest_api(function_id)
         return api.get_deployment(deployment_id)
 
-    def get_deployments(self, function_id: str) -> List[Deployment]:
+    def get_deployments(self, function_id: str) -> list[Deployment]:
         api = self.get_rest_api(function_id)
         return api.get_deployments()
 
@@ -2080,19 +2194,29 @@ class APIGatewayBackend(BaseBackend):
         api = self.get_rest_api(function_id)
         return api.delete_deployment(deployment_id)
 
-    def create_api_key(self, payload: Dict[str, Any]) -> ApiKey:
+    def create_api_key(self, payload: dict[str, Any]) -> ApiKey:
         if payload.get("value"):
             if len(payload.get("value", [])) < 20:
                 raise ApiKeyValueMinLength()
             for api_key in self.get_api_keys():
                 if api_key.value == payload["value"]:
                     raise ApiKeyAlreadyExists()
-        key = ApiKey(**payload)
+        api_key_id = ApigwApiKeyIdentifier(
+            self.account_id,
+            self.region_name,
+            # The value of an api key must be unique on aws
+            payload.get("value", ""),
+        ).generate()
+        key = ApiKey(api_key_id=api_key_id, **payload)
         self.keys[key.id] = key
         return key
 
-    def get_api_keys(self) -> List[ApiKey]:
-        return list(self.keys.values())
+    def get_api_keys(self, name: str | None = None) -> list[ApiKey]:
+        return [
+            key
+            for key in self.keys.values()
+            if not name or (key.name and key.name.startswith(name))
+        ]
 
     def get_api_key(self, api_key_id: str) -> ApiKey:
         if api_key_id not in self.keys:
@@ -2100,18 +2224,25 @@ class APIGatewayBackend(BaseBackend):
         return self.keys[api_key_id]
 
     def update_api_key(self, api_key_id: str, patch_operations: Any) -> ApiKey:
+        if api_key_id not in self.keys:
+            raise ApiKeyNotFoundException()
         key = self.keys[api_key_id]
         return key.update_operations(patch_operations)
 
     def delete_api_key(self, api_key_id: str) -> None:
+        if api_key_id not in self.keys:
+            raise ApiKeyNotFoundException()
         self.keys.pop(api_key_id)
 
     def create_usage_plan(self, payload: Any) -> UsagePlan:
-        plan = UsagePlan(**payload)
+        usage_plan_id = ApigwUsagePlanIdentifier(
+            self.account_id, self.region_name, payload["name"]
+        ).generate()
+        plan = UsagePlan(usage_plan_id=usage_plan_id, **payload)
         self.usage_plans[plan.id] = plan
         return plan
 
-    def get_usage_plans(self, api_key_id: Optional[str] = None) -> List[UsagePlan]:
+    def get_usage_plans(self, api_key_id: str | None = None) -> list[UsagePlan]:
         plans = list(self.usage_plans.values())
         if api_key_id is not None:
             plans = [
@@ -2143,7 +2274,7 @@ class APIGatewayBackend(BaseBackend):
         self.usage_plans.pop(usage_plan_id)
 
     def create_usage_plan_key(
-        self, usage_plan_id: str, payload: Dict[str, Any]
+        self, usage_plan_id: str, payload: dict[str, Any]
     ) -> UsagePlanKey:
         if usage_plan_id not in self.usage_plan_keys:
             self.usage_plan_keys[usage_plan_id] = {}
@@ -2163,11 +2294,20 @@ class APIGatewayBackend(BaseBackend):
         self.usage_plan_keys[usage_plan_id][usage_plan_key.id] = usage_plan_key
         return usage_plan_key
 
-    def get_usage_plan_keys(self, usage_plan_id: str) -> List[UsagePlanKey]:
+    def get_usage_plan_keys(
+        self, usage_plan_id: str, name: str | None = None
+    ) -> list[UsagePlanKey]:
         if usage_plan_id not in self.usage_plan_keys:
             return []
 
-        return list(self.usage_plan_keys[usage_plan_id].values())
+        plan_keys = self.usage_plan_keys[usage_plan_id].values()
+        if name:
+            return [
+                key
+                for key in plan_keys
+                if not name or (key.name and key.name.startswith(name))
+            ]
+        return list(plan_keys)
 
     def get_usage_plan_key(self, usage_plan_id: str, key_id: str) -> UsagePlanKey:
         # first check if is a valid api key
@@ -2197,7 +2337,7 @@ class APIGatewayBackend(BaseBackend):
         self,
         domain_name: str,
         certificate_name: str,
-        tags: List[Dict[str, str]],
+        tags: list[dict[str, str]],
         certificate_arn: str,
         certificate_body: str,
         certificate_private_key: str,
@@ -2228,7 +2368,7 @@ class APIGatewayBackend(BaseBackend):
         self.domain_names[domain_name] = new_domain_name
         return new_domain_name
 
-    def get_domain_names(self) -> List[DomainName]:
+    def get_domain_names(self) -> list[DomainName]:
         return list(self.domain_names.values())
 
     def get_domain_name(self, domain_name: str) -> DomainName:
@@ -2266,7 +2406,7 @@ class APIGatewayBackend(BaseBackend):
 
         return new_model
 
-    def get_models(self, rest_api_id: str) -> List[Model]:
+    def get_models(self, rest_api_id: str) -> list[Model]:
         if not rest_api_id:
             raise InvalidRestApiId
         api = self.get_rest_api(rest_api_id)
@@ -2283,12 +2423,18 @@ class APIGatewayBackend(BaseBackend):
         else:
             return model
 
-    def get_request_validators(self, restapi_id: str) -> List[RequestValidator]:
+    def delete_model(self, rest_api_id: str, model_name: str) -> None:
+        api = self.get_rest_api(rest_api_id)
+        if model_name not in api.models:
+            raise ModelNotFound
+        del api.models[model_name]
+
+    def get_request_validators(self, restapi_id: str) -> list[RequestValidator]:
         restApi = self.get_rest_api(restapi_id)
         return restApi.get_request_validators()
 
     def create_request_validator(
-        self, restapi_id: str, name: str, body: Optional[bool], params: Any
+        self, restapi_id: str, name: str, body: bool | None, params: Any
     ) -> RequestValidator:
         restApi = self.get_rest_api(restapi_id)
         return restApi.create_request_validator(
@@ -2345,7 +2491,7 @@ class APIGatewayBackend(BaseBackend):
         self.base_path_mappings[domain_name][new_base_path] = new_base_path_mapping
         return new_base_path_mapping
 
-    def get_base_path_mappings(self, domain_name: str) -> List[BasePathMapping]:
+    def get_base_path_mappings(self, domain_name: str) -> list[BasePathMapping]:
         if domain_name not in self.domain_names:
             raise DomainNameNotFound()
 
@@ -2422,11 +2568,18 @@ class APIGatewayBackend(BaseBackend):
         self,
         name: str,
         description: str,
-        target_arns: List[str],
-        tags: List[Dict[str, str]],
+        target_arns: list[str],
+        tags: list[dict[str, str]],
     ) -> VpcLink:
+        vpc_link_id = ApigwVpcLinkIdentifier(
+            self.account_id, self.region_name, name
+        ).generate()
         vpc_link = VpcLink(
-            name, description=description, target_arns=target_arns, tags=tags
+            vpc_link_id,
+            name,
+            description=description,
+            target_arns=target_arns,
+            tags=tags,
         )
         self.vpc_links[vpc_link.id] = vpc_link
         return vpc_link
@@ -2439,7 +2592,7 @@ class APIGatewayBackend(BaseBackend):
             raise VpcLinkNotFound
         return self.vpc_links[vpc_link_id]
 
-    def get_vpc_links(self) -> List[VpcLink]:
+    def get_vpc_links(self) -> list[VpcLink]:
         """
         Pagination has not yet been implemented
         """
@@ -2468,7 +2621,7 @@ class APIGatewayBackend(BaseBackend):
         api = self.get_rest_api(rest_api_id)
         return api.get_gateway_response(response_type)
 
-    def get_gateway_responses(self, rest_api_id: str) -> List[GatewayResponse]:
+    def get_gateway_responses(self, rest_api_id: str) -> list[GatewayResponse]:
         """
         Pagination is not yet implemented
         """
@@ -2478,6 +2631,65 @@ class APIGatewayBackend(BaseBackend):
     def delete_gateway_response(self, rest_api_id: str, response_type: str) -> None:
         api = self.get_rest_api(rest_api_id)
         api.delete_gateway_response(response_type)
+
+    def update_account(self, patch_operations: list[dict[str, Any]]) -> Account:
+        account = self.account.apply_patch_operations(patch_operations)
+        return account
+
+    def get_account(self) -> Account:
+        return self.account
+
+    def _build_integration_args(
+        self, x_amaz_apigw_integ: dict[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            "integration_type": x_amaz_apigw_integ.get("type"),
+            "uri": x_amaz_apigw_integ.get("uri"),
+            "integration_method": x_amaz_apigw_integ.get("httpMethod"),
+            "credentials": x_amaz_apigw_integ.get("credentials"),
+            "request_templates": x_amaz_apigw_integ.get("requestTemplates"),
+            "passthrough_behavior": x_amaz_apigw_integ.get("passthroughBehavior"),
+            "tls_config": x_amaz_apigw_integ.get("tlsConfig"),
+            "cache_namespace": x_amaz_apigw_integ.get("cacheNamespace"),
+            "timeout_in_millis": x_amaz_apigw_integ.get("timeoutInMillis"),
+            "request_parameters": x_amaz_apigw_integ.get("requestParameters"),
+            "content_handling": x_amaz_apigw_integ.get("contentHandling"),
+            "connection_type": x_amaz_apigw_integ.get("connectionType"),
+        }
+
+    def _build_integration_responses_args(
+        self, x_amaz_apigw_integ: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Extract IntegrationResponse arguments from the integration."""
+        responses = x_amaz_apigw_integ.get("responses", {})
+
+        result = []
+
+        for pattern, response_config in responses.items():
+            status_code = response_config.get("statusCode")
+
+            # API Gateway: "default" → selection_pattern = ""
+            if pattern == "default":
+                selection_pattern = ""
+            else:
+                selection_pattern = pattern
+
+            response_templates = response_config.get("responseTemplates", {}) or {}
+            response_parameters = response_config.get("responseParameters", {}) or {}
+
+            content_handling = response_config.get("contentHandling")
+
+            result.append(
+                {
+                    "status_code": status_code,
+                    "selection_pattern": selection_pattern,
+                    "response_templates": response_templates,
+                    "response_parameters": response_parameters,
+                    "content_handling": content_handling,
+                }
+            )
+
+        return result
 
 
 apigateway_backends = BackendDict(APIGatewayBackend, "apigateway")

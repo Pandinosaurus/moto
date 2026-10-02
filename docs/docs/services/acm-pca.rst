@@ -18,45 +18,53 @@ acm-pca
 
 - [X] create_certificate_authority
   
-        The following parameters are not yet implemented: IdempotencyToken, KeyStorageSecurityStandard, UsageMode
-        
+The following parameters are not yet implemented: IdempotencyToken, KeyStorageSecurityStandard, UsageMode
+
 
 - [ ] create_certificate_authority_audit_report
 - [ ] create_permission
 - [X] delete_certificate_authority
 - [ ] delete_permission
-- [ ] delete_policy
+- [X] delete_policy
+  
+Deletes the resource-based policy attached to a private CA.
+
+
 - [X] describe_certificate_authority
 - [ ] describe_certificate_authority_audit_report
 - [X] get_certificate
-  
-        The CertificateChain will always return None for now
-        
-
 - [X] get_certificate_authority_certificate
 - [X] get_certificate_authority_csr
-- [ ] get_policy
+- [X] get_policy
+  
+Retrieves the resource-based policy attached to a private CA.
+
+
 - [X] import_certificate_authority_certificate
 - [X] issue_certificate
   
-        The following parameters are not yet implemented: ApiPassthrough, SigningAlgorithm, TemplateArn, Validity, ValidityNotBefore, IdempotencyToken
-        Some fields of the resulting certificate will have default values, instead of using the CSR
-        
+The following parameters are not yet implemented: ApiPassthrough, SigningAlgorithm, Validity, ValidityNotBefore, IdempotencyToken
+Some fields of the resulting certificate will have default values, instead of using the CSR
 
-- [ ] list_certificate_authorities
+
+- [X] list_certificate_authorities
+  
+Lists the private certificate authorities that you created by using the CreateCertificateAuthority action.
+
+
 - [ ] list_permissions
 - [X] list_tags
   
-        Pagination is not yet implemented
-        
+Pagination is not yet implemented
 
-- [ ] put_policy
+
+- [X] put_policy
+  
+Attaches a resource-based policy to a private CA.
+
+
 - [ ] restore_certificate_authority
 - [X] revoke_certificate
-  
-        This is currently a NO-OP
-        
-
 - [X] tag_certificate_authority
 - [X] untag_certificate_authority
 - [X] update_certificate_authority

@@ -1,5 +1,5 @@
 from threading import Thread
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from moto.core.utils import gzip_decompress
@@ -15,18 +15,19 @@ class TableImport(Thread):
     def __init__(
         self,
         account_id: str,
-        s3_source: Dict[str, str],
+        s3_source: dict[str, str],
         region_name: str,
         table_name: str,
         billing_mode: str,
-        throughput: Optional[Dict[str, int]],
-        key_schema: List[Dict[str, str]],
-        global_indexes: Optional[List[Dict[str, Any]]],
-        attrs: List[Dict[str, str]],
-        compression_type: Optional[str],
+        throughput: dict[str, int] | None,
+        key_schema: list[dict[str, str]],
+        global_indexes: list[dict[str, Any]] | None,
+        attrs: list[dict[str, str]],
+        compression_type: str | None,
     ):
         super().__init__()
-        self.arn = f"arn:{get_partition(region_name)}:dynamodb:{region_name}:{account_id}:table/{table_name}/import/{str(uuid4()).replace('-', '')}"
+        self.partition = get_partition(region_name)
+        self.arn = f"arn:{self.partition}:dynamodb:{region_name}:{account_id}:table/{table_name}/import/{str(uuid4()).replace('-', '')}"
         self.status = "IN_PROGRESS"
         self.account_id = account_id
         self.s3_source = s3_source
@@ -40,9 +41,9 @@ class TableImport(Thread):
         self.attrs = attrs
         self.compression_type = compression_type
 
-        self.failure_code: Optional[str] = None
-        self.failure_message: Optional[str] = None
-        self.table: Optional["Table"] = None
+        self.failure_code: str | None = None
+        self.failure_message: str | None = None
+        self.table: Table | None = None
         self.table_arn = f"arn:{get_partition(self.region_name)}:dynamodb:{self.region_name}:{self.account_id}:table/{table_name}"
 
         self.processed_count = 0
@@ -56,7 +57,7 @@ class TableImport(Thread):
         try:
             from moto.s3.models import s3_backends
 
-            s3_backend = s3_backends[self.account_id]["global"]
+            s3_backend = s3_backends[self.account_id][self.partition]
             bucket = s3_backend.buckets[s3_bucket_name]
         except KeyError:
             self.status = "FAILED"
@@ -88,6 +89,7 @@ class TableImport(Thread):
             streams=None,
             tags=[],
             deletion_protection_enabled=False,
+            warm_throughput=None,
         )
 
         # Load data from S3
@@ -120,7 +122,7 @@ class TableImport(Thread):
 
         self.status = "COMPLETED" if self.error_count == 0 else "FAILED"
 
-    def response(self) -> Dict[str, Any]:
+    def response(self) -> dict[str, Any]:
         return {
             "ImportArn": self.arn,
             "ImportStatus": self.status,

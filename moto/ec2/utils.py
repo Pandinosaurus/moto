@@ -1,8 +1,11 @@
 import base64
 import fnmatch
+import hashlib
 import ipaddress
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple, TypeVar, Union
+from collections.abc import Callable
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, TypeAlias, TypedDict, TypeVar
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
@@ -13,10 +16,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 
-from moto.core.utils import utcnow
+from moto.core.serialize import TimestampSerializer
+from moto.core.types import Base64EncodedString
+from moto.ec2.exceptions import InvalidUserDataError
 from moto.iam import iam_backends
 from moto.moto_api._internal import mock_random as random
 from moto.utilities.utils import md5_hash
+
+if TYPE_CHECKING:
+    HashType: TypeAlias = hashlib._Hash
 
 EC2_RESOURCE_TO_PREFIX = {
     "customer-gateway": "cgw",
@@ -48,6 +56,9 @@ EC2_RESOURCE_TO_PREFIX = {
     "subnet": "subnet",
     "subnet-ipv6-cidr-block-association": "subnet-cidr-assoc",
     "reservation": "r",
+    "traffic-mirror-filter": "traf-mir-fil",
+    "traffic-mirror-session": "tms",
+    "traffic-mirror-target": "traf-mir-tar",
     "volume": "vol",
     "vpc": "vpc",
     "vpc-endpoint": "vpce",
@@ -62,18 +73,19 @@ EC2_RESOURCE_TO_PREFIX = {
     "iam-instance-profile-association": "iip-assoc",
     "carrier-gateway": "cagw",
     "key-pair": "key",
+    "subnet-cidr-reservation": "scr",
 }
 
 
-EC2_PREFIX_TO_RESOURCE = dict((v, k) for (k, v) in EC2_RESOURCE_TO_PREFIX.items())
-HEX_CHARS = list(str(x) for x in range(10)) + ["a", "b", "c", "d", "e", "f"]
+EC2_PREFIX_TO_RESOURCE = {v: k for (k, v) in EC2_RESOURCE_TO_PREFIX.items()}
+HEX_CHARS = [str(x) for x in range(10)] + ["a", "b", "c", "d", "e", "f"]
 
 
 def random_resource_id(size: int = 8) -> str:
     return "".join(random.choice(HEX_CHARS) for _ in range(size))
 
 
-def random_id(prefix: str = "", size: int = 8) -> str:
+def random_id(prefix: str = "", size: int = 17) -> str:
     return f"{prefix}-{random_resource_id(size)}"
 
 
@@ -82,7 +94,7 @@ def random_ami_id() -> str:
 
 
 def random_instance_id() -> str:
-    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["instance"], size=17)
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["instance"])
 
 
 def random_reservation_id() -> str:
@@ -90,11 +102,11 @@ def random_reservation_id() -> str:
 
 
 def random_security_group_id() -> str:
-    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["security-group"], size=17)
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["security-group"])
 
 
 def random_security_group_rule_id() -> str:
-    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["security-group-rule"], size=17)
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["security-group-rule"])
 
 
 def random_fleet_id() -> str:
@@ -164,7 +176,7 @@ def random_vpc_id() -> str:
 
 
 def random_vpc_ep_id() -> str:
-    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["vpc-endpoint"], size=8)
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["vpc-endpoint"])
 
 
 def random_vpc_cidr_association_id() -> str:
@@ -184,9 +196,7 @@ def random_internet_gateway_id() -> str:
 
 
 def random_egress_only_internet_gateway_id() -> str:
-    return random_id(
-        prefix=EC2_RESOURCE_TO_PREFIX["egress-only-internet-gateway"], size=17
-    )
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["egress-only-internet-gateway"])
 
 
 def random_route_table_id() -> str:
@@ -210,27 +220,39 @@ def random_eni_attach_id() -> str:
 
 
 def random_nat_gateway_id() -> str:
-    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["nat-gateway"], size=17)
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["nat-gateway"])
 
 
 def random_transit_gateway_id() -> str:
-    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["transit-gateway"], size=17)
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["transit-gateway"])
+
+
+def random_traffic_mirror_filter_id() -> str:
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["traffic-mirror-filter"])
+
+
+def random_traffic_mirror_target_id() -> str:
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["traffic-mirror-target"])
+
+
+def random_traffic_mirror_session_id() -> str:
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["traffic-mirror-session"])
 
 
 def random_transit_gateway_route_table_id() -> str:
-    return random_id(
-        prefix=EC2_RESOURCE_TO_PREFIX["transit-gateway-route-table"], size=17
-    )
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["transit-gateway-route-table"])
 
 
 def random_transit_gateway_attachment_id() -> str:
-    return random_id(
-        prefix=EC2_RESOURCE_TO_PREFIX["transit-gateway-attachment"], size=17
-    )
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["transit-gateway-attachment"])
+
+
+def random_managed_prefix_list_id() -> str:
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["managed-prefix-list"])
 
 
 def random_launch_template_id() -> str:
-    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["launch-template"], size=17)
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["launch-template"])
 
 
 def random_launch_template_name() -> str:
@@ -242,7 +264,7 @@ def random_iam_instance_profile_association_id() -> str:
 
 
 def random_carrier_gateway_id() -> str:
-    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["carrier-gateway"], size=17)
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["carrier-gateway"])
 
 
 def random_public_ip() -> str:
@@ -250,10 +272,10 @@ def random_public_ip() -> str:
 
 
 def random_dedicated_host_id() -> str:
-    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["dedicated_host"], size=17)
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["dedicated_host"])
 
 
-def random_private_ip(cidr: Optional[str] = None, ipv6: bool = False) -> str:
+def random_private_ip(cidr: str | None = None, ipv6: bool = False) -> str:
     # prefix - ula.prefixlen : get number of remaing length for the IP.
     #                          prefix will be 32 for IPv4 and 128 for IPv6.
     #  random.getrandbits() will generate remaining bits for IPv6 or Ipv4 in decimal format
@@ -278,7 +300,7 @@ def generate_dns_from_ip(ip: Any, dns_type: str = "internal") -> str:
 
 
 def random_mac_address() -> str:
-    return f"02:00:00:{random.randint(0, 255)}02x:{random.randint(0, 255)}02x:{random.randint(0, 255)}02x"
+    return f"02:00:00:{random.randint(0, 255):02x}:{random.randint(0, 255):02x}:{random.randint(0, 255):02x}"
 
 
 def randor_ipv4_cidr() -> str:
@@ -289,11 +311,15 @@ def random_ipv6_cidr() -> str:
     return f"2400:6500:{random_resource_id(4)}:{random_resource_id(2)}00::/56"
 
 
+def random_subnet_cidr_reservation_id() -> str:
+    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["subnet-cidr-reservation"])
+
+
 def generate_route_id(
     route_table_id: str,
-    cidr_block: Optional[str],
-    ipv6_cidr_block: Optional[str] = None,
-    prefix_list: Optional[str] = None,
+    cidr_block: str | None,
+    ipv6_cidr_block: str | None = None,
+    prefix_list: str | None = None,
 ) -> str:
     if ipv6_cidr_block and not cidr_block:
         cidr_block = ipv6_cidr_block
@@ -302,38 +328,20 @@ def generate_route_id(
     return f"{route_table_id}~{cidr_block}"
 
 
-def random_managed_prefix_list_id() -> str:
-    return random_id(prefix=EC2_RESOURCE_TO_PREFIX["managed-prefix-list"], size=8)
-
-
-def create_dns_entries(service_name: str, vpc_endpoint_id: str) -> Dict[str, str]:
+def create_dns_entries(service_name: str, vpc_endpoint_id: str) -> dict[str, str]:
     return {
         "dns_name": f"{vpc_endpoint_id}-{random_resource_id(8)}.{service_name}",
         "hosted_zone_id": random_resource_id(13).upper(),
     }
 
 
-def utc_date_and_time() -> str:
-    x = utcnow()
-    # Better performing alternative to x.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    return f"{x.year}-{x.month:02d}-{x.day:02d}T{x.hour:02d}:{x.minute:02d}:{x.second:02d}.000Z"
+def format_timestamp(dt: datetime) -> str:
+    return dt.strftime(TimestampSerializer.ISO8601_MICRO_ZEROED)
 
 
-def split_route_id(route_id: str) -> Tuple[str, str]:
+def split_route_id(route_id: str) -> tuple[str, str]:
     values = route_id.split("~")
     return values[0], values[1]
-
-
-def get_attribute_value(
-    parameter: str, querystring_dict: Dict[str, List[str]]
-) -> Union[None, bool, str]:
-    for key, value in querystring_dict.items():
-        match = re.search(rf"{parameter}.Value", key)
-        if match:
-            if value[0].lower() in ["true", "false"]:
-                return True if value[0].lower() in ["true"] else False
-            return value[0]
-    return None
 
 
 def get_object_value(obj: Any, attr: str) -> Any:
@@ -345,12 +353,9 @@ def get_object_value(obj: Any, attr: str) -> Any:
         elif isinstance(val, dict):
             val = val[key]
         elif isinstance(val, list):
-            for item in val:
-                item_val = get_object_value(item, key)
-                if item_val:
-                    return item_val
+            val = [get_object_value(item, key) for item in val]
         elif key == "owner_id" and hasattr(val, "account_id"):
-            val = getattr(val, "account_id")
+            val = val.account_id
         else:
             return None
     return val
@@ -364,32 +369,30 @@ def is_tag_filter(filter_name: str) -> bool:
     )
 
 
-def get_obj_tag(obj: Any, filter_name: str) -> Optional[str]:
+def get_obj_tag(obj: Any, filter_name: str) -> str | None:
     tag_name = filter_name.replace("tag:", "", 1)
-    tags = dict((tag["key"], tag["value"]) for tag in obj.get_tags())
+    tags = {tag["key"]: tag["value"] for tag in obj.get_tags()}
     return tags.get(tag_name)
 
 
-def get_obj_tag_names(obj: Any) -> Set[str]:
-    tags = set((tag["key"] for tag in obj.get_tags()))
+def get_obj_tag_names(obj: Any) -> set[str]:
+    tags = {tag["key"] for tag in obj.get_tags()}
     return tags
 
 
-def get_obj_tag_values(obj: Any, key: Optional[str] = None) -> Set[str]:
-    tags = set(
-        (tag["value"] for tag in obj.get_tags() if tag["key"] == key or key is None)
-    )
+def get_obj_tag_values(obj: Any, key: str | None = None) -> set[str]:
+    tags = {tag["value"] for tag in obj.get_tags() if tag["key"] == key or key is None}
     return tags
 
 
-def add_tag_specification(tags: Any) -> Dict[str, str]:
+def add_tag_specification(tags: Any) -> dict[str, str]:
     tags = tags[0] if isinstance(tags, list) and len(tags) == 1 else tags
-    tags = (tags or {}).get("Tag", [])
+    tags = (tags or {}).get("Tags", [])
     tags = {t["Key"]: t["Value"] for t in tags}
     return tags
 
 
-def tag_filter_matches(obj: Any, filter_name: str, filter_values: List[str]) -> bool:
+def tag_filter_matches(obj: Any, filter_name: str, filter_values: list[str]) -> bool:
     regex_filters = [re.compile(simple_aws_filter_to_re(f)) for f in filter_values]
     if filter_name == "tag-key":
         tag_values = get_obj_tag_names(obj)
@@ -413,7 +416,7 @@ def tag_filter_matches(obj: Any, filter_name: str, filter_values: List[str]) -> 
 filter_dict_attribute_mapping = {
     "instance-state-name": "state",
     "instance-id": "id",
-    "state-reason-code": "_state_reason.code",
+    "state-reason-code": "state_reason.code",
     "source-dest-check": "source_dest_check",
     "vpc-id": "vpc_id",
     "group-id": "security_groups.id",
@@ -422,20 +425,20 @@ filter_dict_attribute_mapping = {
     "instance-type": "instance_type",
     "private-ip-address": "private_ip",
     "ip-address": "public_ip",
-    "availability-zone": "placement",
+    "availability-zone": "placement.zone",
     "architecture": "architecture",
     "image-id": "image_id",
-    "network-interface.private-dns-name": "private_dns",
-    "private-dns-name": "private_dns",
+    "network-interface.private-dns-name": "private_dns_name",
+    "private-dns-name": "private_dns_name",
     "owner-id": "owner_id",
     "subnet-id": "subnet_id",
-    "dns-name": "public_dns",
+    "dns-name": "public_dns_name",
     "key-name": "key_name",
     "product-code": "product_codes",
 }
 
 
-def passes_filter_dict(instance: Any, filter_dict: Dict[str, Any]) -> bool:
+def passes_filter_dict(instance: Any, filter_dict: dict[str, Any]) -> bool:
     for filter_name, filter_values in filter_dict.items():
         if filter_name in filter_dict_attribute_mapping:
             instance_attr = filter_dict_attribute_mapping[filter_name]
@@ -448,8 +451,7 @@ def passes_filter_dict(instance: Any, filter_dict: Dict[str, Any]) -> bool:
                 return False
         else:
             raise NotImplementedError(
-                "Filter dicts have not been implemented in Moto for '%s' yet. Feel free to open an issue at https://github.com/getmoto/moto/issues"
-                % filter_name
+                f"Filter dicts have not been implemented in Moto for '{filter_name}' yet. Feel free to open an issue at https://github.com/getmoto/moto/issues"
             )
     return True
 
@@ -457,6 +459,9 @@ def passes_filter_dict(instance: Any, filter_dict: Dict[str, Any]) -> bool:
 def instance_value_in_filter_values(instance_value: Any, filter_values: Any) -> bool:
     if isinstance(instance_value, list):
         if not set(filter_values).intersection(set(instance_value)):
+            return False
+    elif isinstance(instance_value, bool):
+        if str(instance_value).lower() not in filter_values:
             return False
     elif instance_value not in filter_values:
         return False
@@ -467,8 +472,8 @@ FILTER_TYPE = TypeVar("FILTER_TYPE")
 
 
 def filter_reservations(
-    reservations: List[FILTER_TYPE], filter_dict: Any
-) -> List[FILTER_TYPE]:
+    reservations: list[FILTER_TYPE], filter_dict: Any
+) -> list[FILTER_TYPE]:
     result = []
     for reservation in reservations:
         new_instances = []
@@ -488,7 +493,7 @@ filter_dict_igw_mapping = {
 }
 
 
-def passes_igw_filter_dict(igw: Any, filter_dict: Dict[str, Any]) -> bool:
+def passes_igw_filter_dict(igw: Any, filter_dict: dict[str, Any]) -> bool:
     for filter_name, filter_values in filter_dict.items():
         if filter_name in filter_dict_igw_mapping:
             igw_attr = filter_dict_igw_mapping[filter_name]
@@ -506,8 +511,8 @@ def passes_igw_filter_dict(igw: Any, filter_dict: Dict[str, Any]) -> bool:
 
 
 def filter_internet_gateways(
-    igws: List[FILTER_TYPE], filter_dict: Any
-) -> List[FILTER_TYPE]:
+    igws: list[FILTER_TYPE], filter_dict: Any
+) -> list[FILTER_TYPE]:
     result = []
     for igw in igws:
         if passes_igw_filter_dict(igw, filter_dict):
@@ -517,13 +522,28 @@ def filter_internet_gateways(
 
 def is_filter_matching(obj: Any, _filter: str, filter_value: Any) -> bool:
     value = obj.get_filter_value(_filter)
-
     if filter_value is None:
+        return False
+
+    if isinstance(value, bool):
+        if str(value).lower() in filter_value:
+            return True
+        return False
+
+    if isinstance(value, datetime):
+        if format_timestamp(value) in filter_value:
+            return True
+        return False
+
+    if isinstance(value, int):
+        if str(value) in filter_value:
+            return True
         return False
 
     if isinstance(value, str):
         if not isinstance(filter_value, list):
             filter_value = [filter_value]
+
         if any(fnmatch.fnmatch(value, pattern) for pattern in filter_value):
             return True
         return False
@@ -534,6 +554,9 @@ def is_filter_matching(obj: Any, _filter: str, filter_value: Any) -> bool:
 
     try:
         value = set(value)
+        if isinstance(filter_value, list) and len(filter_value) == 1:
+            return any(fnmatch.fnmatch(element, filter_value[0]) for element in value)
+
         return (value and value.issubset(filter_value)) or value.issuperset(
             filter_value
         )
@@ -542,8 +565,8 @@ def is_filter_matching(obj: Any, _filter: str, filter_value: Any) -> bool:
 
 
 def generic_filter(
-    filters: Dict[str, Any], objects: List[FILTER_TYPE]
-) -> List[FILTER_TYPE]:
+    filters: dict[str, Any], objects: list[FILTER_TYPE]
+) -> list[FILTER_TYPE]:
     if filters:
         for _filter, _filter_value in filters.items():
             objects = [
@@ -562,22 +585,35 @@ def simple_aws_filter_to_re(filter_string: str) -> str:
     return tmp_filter
 
 
-def random_ed25519_key_pair() -> Dict[str, str]:
+class KeyDetails(TypedDict):
+    fingerprint: str
+    material: bytes
+    material_public: bytes
+
+
+def random_ed25519_key_pair() -> KeyDetails:
     private_key = Ed25519PrivateKey.generate()
     private_key_material = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.OpenSSH,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    fingerprint = public_key_fingerprint(private_key.public_key())
+    public_key = private_key.public_key()
+    public_key_material = public_key.public_bytes(
+        encoding=serialization.Encoding.OpenSSH,
+        format=serialization.PublicFormat.OpenSSH,
+    )
+    hash_constructor = select_hash_algorithm(public_key)
+    fingerprint = public_key_fingerprint(public_key, hash_constructor)
 
     return {
         "fingerprint": fingerprint,
-        "material": private_key_material.decode("ascii"),
+        "material": private_key_material,
+        "material_public": public_key_material,
     }
 
 
-def random_rsa_key_pair() -> Dict[str, str]:
+def random_rsa_key_pair() -> KeyDetails:
     private_key = rsa.generate_private_key(
         public_exponent=65537, key_size=2048, backend=default_backend()
     )
@@ -586,11 +622,18 @@ def random_rsa_key_pair() -> Dict[str, str]:
         format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    fingerprint = public_key_fingerprint(private_key.public_key())
+    public_key = private_key.public_key()
+    public_key_material = public_key.public_bytes(
+        encoding=serialization.Encoding.OpenSSH,
+        format=serialization.PublicFormat.OpenSSH,
+    )
+    hash_constructor = select_hash_algorithm(public_key, is_imported=False)
+    fingerprint = public_key_fingerprint(public_key, hash_constructor)
 
     return {
         "fingerprint": fingerprint,
-        "material": private_key_material.decode("ascii"),
+        "material": private_key_material,
+        "material_public": public_key_material,
     }
 
 
@@ -644,7 +687,7 @@ def is_valid_security_group_id(sg_id: str) -> bool:
     return compiled_re.match(sg_id) is not None
 
 
-def generate_instance_identity_document(instance: Any) -> Dict[str, Any]:
+def generate_instance_identity_document(instance: Any) -> dict[str, Any]:
     """
     http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-identity-documents.html
 
@@ -716,14 +759,8 @@ def _convert_rfc4716(data: bytes) -> bytes:
     return b" ".join(result_parts)
 
 
-def public_key_parse(
-    key_material: Union[str, bytes],
-) -> Union[RSAPublicKey, Ed25519PublicKey]:
+def public_key_parse(key_material: bytes) -> RSAPublicKey | Ed25519PublicKey:
     try:
-        if isinstance(key_material, str):
-            key_material = key_material.encode("ascii")
-        key_material = base64.b64decode(key_material)
-
         if key_material.startswith(b"---- BEGIN SSH2 PUBLIC KEY ----"):
             # cryptography doesn't parse RFC4716 key format, so we have to convert it first
             key_material = _convert_rfc4716(key_material)
@@ -738,21 +775,33 @@ def public_key_parse(
     return public_key
 
 
-def public_key_fingerprint(public_key: Union[RSAPublicKey, Ed25519PublicKey]) -> str:
-    # TODO: Use different fingerprint calculation methods based on key type and source
-    # see https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/verify-keys.html#how-ec2-key-fingerprints-are-calculated
+def public_key_fingerprint(
+    public_key: RSAPublicKey | Ed25519PublicKey,
+    hash_constructor: Callable[[bytes], "HashType"],
+) -> str:
     key_data = public_key.public_bytes(
         encoding=serialization.Encoding.DER,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
-    fingerprint_hex = md5_hash(key_data).hexdigest()
+    fingerprint_hex = hash_constructor(key_data).hexdigest()
     fingerprint = re.sub(r"([a-f0-9]{2})(?!$)", r"\1:", fingerprint_hex)
     return fingerprint
 
 
+def select_hash_algorithm(
+    public_key: RSAPublicKey | Ed25519PublicKey, is_imported: bool = True
+) -> Callable[[bytes], "HashType"]:
+    if isinstance(public_key, Ed25519PublicKey):
+        return hashlib.sha256
+    elif is_imported:
+        return md5_hash
+
+    return hashlib.sha1
+
+
 def filter_iam_instance_profile_associations(
-    iam_instance_associations: List[FILTER_TYPE], filter_dict: Any
-) -> List[FILTER_TYPE]:
+    iam_instance_associations: list[FILTER_TYPE], filter_dict: Any
+) -> list[FILTER_TYPE]:
     if not filter_dict:
         return iam_instance_associations
     result = []
@@ -761,11 +810,11 @@ def filter_iam_instance_profile_associations(
         if filter_dict.get("instance-id"):
             if (
                 iam_instance_association.instance.id  # type: ignore[attr-defined]
-                not in filter_dict.get("instance-id").values()
+                not in filter_dict.get("instance-id", [])
             ):
                 filter_passed = False
         if filter_dict.get("state"):
-            if iam_instance_association.state not in filter_dict.get("state").values():  # type: ignore[attr-defined]
+            if iam_instance_association.state not in filter_dict.get("state", []):  # type: ignore[attr-defined]
                 filter_passed = False
         if filter_passed:
             result.append(iam_instance_association)
@@ -774,21 +823,23 @@ def filter_iam_instance_profile_associations(
 
 def filter_iam_instance_profiles(
     account_id: str,
-    iam_instance_profile_arn: Optional[str],
-    iam_instance_profile_name: Optional[str],
+    partition: str,
+    iam_instance_profile_arn: str | None,
+    iam_instance_profile_name: str | None,
 ) -> Any:
     instance_profile = None
     instance_profile_by_name = None
     instance_profile_by_arn = None
+    backend = iam_backends[account_id][partition]
     if iam_instance_profile_name:
-        instance_profile_by_name = iam_backends[account_id][
-            "global"
-        ].get_instance_profile(iam_instance_profile_name)
+        instance_profile_by_name = backend.get_instance_profile(
+            iam_instance_profile_name
+        )
         instance_profile = instance_profile_by_name
     if iam_instance_profile_arn:
-        instance_profile_by_arn = iam_backends[account_id][
-            "global"
-        ].get_instance_profile_by_arn(iam_instance_profile_arn)
+        instance_profile_by_arn = backend.get_instance_profile_by_arn(
+            iam_instance_profile_arn
+        )
         instance_profile = instance_profile_by_arn
     # We would prefer instance profile that we found by arn
     if iam_instance_profile_arn and iam_instance_profile_name:
@@ -801,8 +852,8 @@ def filter_iam_instance_profiles(
 
 
 def describe_tag_filter(
-    filters: Any, instances: List[FILTER_TYPE]
-) -> List[FILTER_TYPE]:
+    filters: Any, instances: list[FILTER_TYPE]
+) -> list[FILTER_TYPE]:
     result = instances.copy()
     for instance in instances:
         for key in filters:
@@ -826,8 +877,8 @@ def describe_tag_filter(
 
 
 def gen_moto_amis(
-    described_images: List[Dict[str, Any]], drop_images_missing_keys: bool = True
-) -> List[Dict[str, Any]]:
+    described_images: list[dict[str, Any]], drop_images_missing_keys: bool = True
+) -> list[dict[str, Any]]:
     """Convert `boto3.EC2.Client.describe_images` output to form acceptable to `MOTO_AMIS_PATH`
 
     Parameters
@@ -870,6 +921,7 @@ def gen_moto_amis(
                 "root_device_name": image["RootDeviceName"],
                 "root_device_type": image["RootDeviceType"],
                 "sriov": image.get("SriovNetSupport", "simple"),
+                "tags": {tag["Key"]: tag["Value"] for tag in image.get("Tags", [])},
             }
             result.append(tmp)
         except Exception as err:
@@ -880,12 +932,12 @@ def gen_moto_amis(
 
 
 def convert_tag_spec(
-    tag_spec_set: List[Dict[str, Any]], tag_key: str = "Tag"
-) -> Dict[str, Dict[str, str]]:
+    tag_spec_set: list[dict[str, Any]], tag_key: str = "Tags"
+) -> dict[str, dict[str, str]]:
     # IN:   [{"ResourceType": _type, "Tag": [{"Key": k, "Value": v}, ..]}]
     #  (or) [{"ResourceType": _type, "Tags": [{"Key": k, "Value": v}, ..]}] <-- special cfn case
     # OUT:  {_type: {k: v, ..}}
-    tags: Dict[str, Dict[str, str]] = {}
+    tags: dict[str, dict[str, str]] = {}
     for tag_spec in tag_spec_set:
         if tag_spec["ResourceType"] not in tags:
             tags[tag_spec["ResourceType"]] = {}
@@ -893,3 +945,16 @@ def convert_tag_spec(
             {tag["Key"]: tag["Value"] for tag in tag_spec[tag_key]}
         )
     return tags
+
+
+def parse_user_data(value: Any) -> Base64EncodedString | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, bytes):
+            user_data = Base64EncodedString.from_encoded_bytes(value)
+        else:
+            user_data = Base64EncodedString(value)
+    except ValueError:
+        raise InvalidUserDataError("Invalid BASE64 encoding of user data.")
+    return user_data

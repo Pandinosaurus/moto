@@ -19,6 +19,7 @@ emr
 - [X] add_job_flow_steps
 - [X] add_tags
 - [ ] cancel_steps
+- [ ] create_persistent_app_ui
 - [X] create_security_configuration
 - [ ] create_studio
 - [ ] create_studio_session_mapping
@@ -28,14 +29,19 @@ emr
 - [X] describe_cluster
 - [X] describe_job_flows
 - [ ] describe_notebook_execution
+- [ ] describe_persistent_app_ui
 - [ ] describe_release_label
 - [ ] describe_security_configuration
 - [X] describe_step
 - [ ] describe_studio
 - [ ] get_auto_termination_policy
-- [ ] get_block_public_access_configuration
+- [X] get_block_public_access_configuration
 - [ ] get_cluster_session_credentials
 - [ ] get_managed_scaling_policy
+- [ ] get_on_cluster_app_ui_presigned_url
+- [ ] get_persistent_app_ui_presigned_url
+- [ ] get_session
+- [ ] get_session_endpoint
 - [ ] get_studio_session_mapping
 - [X] list_bootstrap_actions
 - [X] list_clusters
@@ -43,18 +49,27 @@ emr
 - [X] list_instance_groups
 - [X] list_instances
 - [ ] list_notebook_executions
-- [ ] list_release_labels
+- [X] list_release_labels
+  
+Pagination and Filtering is not yet implemented
+
+
 - [ ] list_security_configurations
+- [ ] list_sessions
 - [X] list_steps
 - [ ] list_studio_session_mappings
 - [ ] list_studios
-- [ ] list_supported_instance_types
+- [X] list_supported_instance_types
+  
+Pagination is not yet implemented
+
+
 - [X] modify_cluster
 - [ ] modify_instance_fleet
 - [X] modify_instance_groups
 - [X] put_auto_scaling_policy
 - [ ] put_auto_termination_policy
-- [ ] put_block_public_access_configuration
+- [X] put_block_public_access_configuration
 - [ ] put_managed_scaling_policy
 - [X] remove_auto_scaling_policy
 - [ ] remove_auto_termination_policy
@@ -66,8 +81,10 @@ emr
 - [ ] set_unhealthy_node_replacement
 - [X] set_visible_to_all_users
 - [ ] start_notebook_execution
+- [ ] start_session
 - [ ] stop_notebook_execution
 - [X] terminate_job_flows
+- [ ] terminate_session
 - [ ] update_studio
 - [ ] update_studio_session_mapping
 

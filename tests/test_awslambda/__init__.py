@@ -9,6 +9,8 @@ from botocore.exceptions import ClientError
 
 from moto import mock_aws
 
+from .utilities import PYTHON_VERSION
+
 
 def lambda_aws_verified(func):
     """
@@ -25,7 +27,7 @@ def lambda_aws_verified(func):
     """
 
     @wraps(func)
-    def pagination_wrapper():
+    def pagination_wrapper(**kwargs):
         role_name = "moto_test_role_" + str(uuid4())[0:6]
 
         allow_aws_request = (
@@ -33,12 +35,12 @@ def lambda_aws_verified(func):
         )
 
         if allow_aws_request:
-            return create_role_and_test(role_name)
+            return create_role_and_test(kwargs, role_name)
         else:
             with mock_aws():
-                return create_role_and_test(role_name)
+                return create_role_and_test(kwargs, role_name)
 
-    def create_role_and_test(role_name):
+    def create_role_and_test(kwargs, role_name):
         from .test_lambda import _lambda_region
 
         policy_doc = {
@@ -63,8 +65,16 @@ def lambda_aws_verified(func):
             # Role is not immediately available
             check_iam_role_is_ready_to_use(iam_role_arn, role_name, _lambda_region)
 
-            resp = func(iam_role_arn)
+            kwargs["iam_role_arn"] = iam_role_arn
+            resp = func(**kwargs)
         finally:
+            for policy in iam.list_attached_role_policies(RoleName=role_name)[
+                "AttachedPolicies"
+            ]:
+                iam.detach_role_policy(
+                    RoleName=role_name,
+                    PolicyArn=policy["PolicyArn"],
+                )
             iam.delete_role(RoleName=role_name)
 
         return resp
@@ -90,7 +100,7 @@ def lambda_aws_verified(func):
                 fn_name = f"fn_for_{role_name}"
                 _lambda.create_function(
                     FunctionName=fn_name,
-                    Runtime="python3.11",
+                    Runtime=PYTHON_VERSION,
                     Role=role_arn,
                     Handler="lambda_function.lambda_handler",
                     Code={"ZipFile": get_test_zip_file1()},
@@ -100,9 +110,18 @@ def lambda_aws_verified(func):
 
                 return
             except ClientError:
-                sleep(1)
+                sleep(2)
         raise Exception(
             f"Couldn't create test Lambda FN using IAM role {role_name}, probably because it wasn't ready in time"
         )
 
     return pagination_wrapper
+
+
+def delete_all_layer_versions(client, layer_name: str):
+    versions = client.list_layer_versions(LayerName=layer_name)["LayerVersions"]
+    for version in versions:
+        client.delete_layer_version(
+            LayerName=layer_name,
+            VersionNumber=version["Version"],
+        )

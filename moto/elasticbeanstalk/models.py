@@ -1,24 +1,25 @@
 import weakref
-from typing import Dict, List
+from collections.abc import Iterator
 
 from moto.core.base_backend import BackendDict, BaseBackend
 from moto.core.common_models import BaseModel
+from moto.core.resource_tagging import TaggableResourcesMixin, TaggedResource
 
+from ..core.utils import utcnow
 from .exceptions import (
-    ApplicationNotFound,
     InvalidParameterValueError,
     ResourceNotFoundException,
 )
 from .utils import make_arn
 
 
-class FakeEnvironment(BaseModel):
+class Environment(BaseModel):
     def __init__(
         self,
-        application: "FakeApplication",
+        application: "Application",
         environment_name: str,
         solution_stack_name: str,
-        tags: Dict[str, str],
+        tags: dict[str, str],
     ):
         self.application = weakref.proxy(
             application
@@ -26,6 +27,24 @@ class FakeEnvironment(BaseModel):
         self.environment_name = environment_name
         self.solution_stack_name = solution_stack_name
         self.tags = tags
+        self.date_created = utcnow()
+        self.date_updated = utcnow()
+        # TODO: These attributes were all hardcoded in the original XML templates and need to be properly implemented.
+        self.environment_id = ""
+        self.version_label = 1
+        self.solution_stack_name = "None"
+        self.endpoint_url = ""
+        self.cname = ""
+        self.status = "Ready"
+        self.abortable_operation_in_progress = False
+        self.health = "Grey"
+        self.health_status = "No Data"
+        self.tier = {
+            "Name": "WebServer",
+            "Type": "Standard",
+            "Version": "1.0",
+        }
+        self.environment_links: list[dict[str, str]] = []
 
     @property
     def application_name(self) -> str:
@@ -47,7 +66,7 @@ class FakeEnvironment(BaseModel):
         return self.application.region
 
 
-class FakeApplication(BaseModel):
+class Application(BaseModel):
     def __init__(
         self,
         backend: "EBBackend",
@@ -55,7 +74,7 @@ class FakeApplication(BaseModel):
     ):
         self.backend = weakref.proxy(backend)  # weakref to break cycles
         self.application_name = application_name
-        self.environments: Dict[str, FakeEnvironment] = dict()
+        self.environments: dict[str, Environment] = {}
         self.account_id = self.backend.account_id
         self.region = self.backend.region_name
         self.arn = make_arn(
@@ -63,12 +82,12 @@ class FakeApplication(BaseModel):
         )
 
     def create_environment(
-        self, environment_name: str, solution_stack_name: str, tags: Dict[str, str]
-    ) -> FakeEnvironment:
+        self, environment_name: str, solution_stack_name: str, tags: dict[str, str]
+    ) -> Environment:
         if environment_name in self.environments:
             raise InvalidParameterValueError(message="")
 
-        env = FakeEnvironment(
+        env = Environment(
             application=self,
             environment_name=environment_name,
             solution_stack_name=solution_stack_name,
@@ -79,32 +98,34 @@ class FakeApplication(BaseModel):
         return env
 
 
-class EBBackend(BaseBackend):
+class EBBackend(BaseBackend, TaggableResourcesMixin):
+    SERVICE_NAMESPACE = "elasticbeanstalk"
+
     def __init__(self, region_name: str, account_id: str):
         super().__init__(region_name, account_id)
-        self.applications: Dict[str, FakeApplication] = dict()
+        self.applications: dict[str, Application] = {}
 
-    def create_application(self, application_name: str) -> FakeApplication:
+    def create_application(self, application_name: str) -> Application:
         if application_name in self.applications:
             raise InvalidParameterValueError(
                 f"Application {application_name} already exists."
             )
-        new_app = FakeApplication(backend=self, application_name=application_name)
+        new_app = Application(backend=self, application_name=application_name)
         self.applications[application_name] = new_app
         return new_app
 
     def create_environment(
         self,
-        app: FakeApplication,
+        app: Application,
         environment_name: str,
         stack_name: str,
-        tags: Dict[str, str],
-    ) -> FakeEnvironment:
+        tags: dict[str, str],
+    ) -> Environment:
         return app.create_environment(
             environment_name=environment_name, solution_stack_name=stack_name, tags=tags
         )
 
-    def describe_environments(self) -> List[FakeEnvironment]:
+    def describe_environments(self) -> list[Environment]:
         envs = []
         for app in self.applications.values():
             for env in app.environments.values():
@@ -116,7 +137,7 @@ class EBBackend(BaseBackend):
         pass
 
     def update_tags_for_resource(
-        self, resource_arn: str, tags_to_add: Dict[str, str], tags_to_remove: List[str]
+        self, resource_arn: str, tags_to_add: dict[str, str], tags_to_remove: list[str]
     ) -> None:
         try:
             res = self._find_environment_by_arn(resource_arn)
@@ -131,7 +152,7 @@ class EBBackend(BaseBackend):
         for key in tags_to_remove:
             del res.tags[key]
 
-    def list_tags_for_resource(self, resource_arn: str) -> Dict[str, str]:
+    def list_tags_for_resource(self, resource_arn: str) -> dict[str, str]:
         try:
             res = self._find_environment_by_arn(resource_arn)
         except KeyError:
@@ -140,7 +161,7 @@ class EBBackend(BaseBackend):
             )
         return res.tags
 
-    def _find_environment_by_arn(self, arn: str) -> FakeEnvironment:
+    def _find_environment_by_arn(self, arn: str) -> Environment:
         for app in self.applications.keys():
             for env in self.applications[app].environments.values():
                 if env.environment_arn == arn:
@@ -151,11 +172,19 @@ class EBBackend(BaseBackend):
         self,
         application_name: str,
     ) -> None:
-        if application_name:
-            if application_name in self.applications:
-                self.applications.pop(application_name)
-            else:
-                raise ApplicationNotFound(application_name)
+        if application_name in self.applications:
+            self.applications.pop(application_name)
+
+    # Resource Groups Tagging API (TaggableResourcesMixin method overrides)
+    def iter_tagged_resources(self) -> Iterator[TaggedResource]:
+        for app in self.applications.values():
+            for env in app.environments.values():
+                yield TaggedResource(
+                    arn=env.environment_arn,
+                    tags=dict(env.tags or {}),
+                    resource_type="elasticbeanstalk:environment",
+                    extra={"include_untagged": True},
+                )
 
 
 eb_backends = BackendDict(EBBackend, "elasticbeanstalk")

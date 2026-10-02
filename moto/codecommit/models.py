@@ -1,5 +1,3 @@
-from typing import Dict, Optional
-
 from moto.core.base_backend import BackendDict, BaseBackend
 from moto.core.common_models import BaseModel
 from moto.core.utils import iso_8601_datetime_with_milliseconds
@@ -18,7 +16,7 @@ class CodeCommit(BaseModel):
         repository_name: str,
     ):
         current_date = iso_8601_datetime_with_milliseconds()
-        self.repository_metadata = dict()
+        self.repository_metadata = {}
         self.repository_metadata["repositoryName"] = repository_name
         self.repository_metadata["cloneUrlSsh"] = (
             f"ssh://git-codecommit.{region}.amazonaws.com/v1/repos/{repository_name}"
@@ -39,11 +37,11 @@ class CodeCommit(BaseModel):
 class CodeCommitBackend(BaseBackend):
     def __init__(self, region_name: str, account_id: str):
         super().__init__(region_name, account_id)
-        self.repositories: Dict[str, CodeCommit] = {}
+        self.repositories: dict[str, CodeCommit] = {}
 
     def create_repository(
         self, repository_name: str, repository_description: str
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         repository = self.repositories.get(repository_name)
         if repository:
             raise RepositoryNameExistsException(repository_name)
@@ -54,14 +52,14 @@ class CodeCommitBackend(BaseBackend):
 
         return self.repositories[repository_name].repository_metadata
 
-    def get_repository(self, repository_name: str) -> Dict[str, str]:
+    def get_repository(self, repository_name: str) -> dict[str, str]:
         repository = self.repositories.get(repository_name)
         if not repository:
             raise RepositoryDoesNotExistException(repository_name)
 
         return repository.repository_metadata
 
-    def delete_repository(self, repository_name: str) -> Optional[str]:
+    def delete_repository(self, repository_name: str) -> str | None:
         repository = self.repositories.get(repository_name)
 
         if repository:

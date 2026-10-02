@@ -5,18 +5,19 @@ import pytest
 import moto.server as server
 from moto import mock_aws, settings
 from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
+from moto.utilities.constants import APPLICATION_AMZ_JSON_1_1
 
-from .test_helper_functions import CREATE_WEB_ACL_BODY, LIST_WEB_ACL_BODY
+from .test_helper_functions import CREATE_WEB_ACL_BODY
 
 CREATE_WEB_ACL_HEADERS = {
     "X-Amz-Target": "AWSWAF_20190729.CreateWebACL",
-    "Content-Type": "application/json",
+    "Content-Type": APPLICATION_AMZ_JSON_1_1,
 }
 
 
 LIST_WEB_ACL_HEADERS = {
     "X-Amz-Target": "AWSWAF_20190729.ListWebACLs",
-    "Content-Type": "application/json",
+    "Content-Type": APPLICATION_AMZ_JSON_1_1,
 }
 
 
@@ -64,7 +65,7 @@ def test_create_web_acl():
     )
     web_acl = res.json["Summary"]
     assert web_acl.get("ARN").startswith(
-        f"arn:aws:wafv2:global:{ACCOUNT_ID}:global/webacl/Carl/"
+        f"arn:aws:wafv2:us-east-1:{ACCOUNT_ID}:global/webacl/Carl/"
     )
 
 
@@ -89,7 +90,7 @@ def test_list_web_ac_ls():
         json=CREATE_WEB_ACL_BODY("Sarah", "CLOUDFRONT"),
     )
     res = test_client.post(
-        "/", headers=LIST_WEB_ACL_HEADERS, json=LIST_WEB_ACL_BODY("REGIONAL")
+        "/", headers=LIST_WEB_ACL_HEADERS, json={"Scope": "REGIONAL"}
     )
     assert res.status_code == 200
 
@@ -99,7 +100,7 @@ def test_list_web_ac_ls():
     assert web_acls[1]["Name"] == "JohnSon"
 
     res = test_client.post(
-        "/", headers=LIST_WEB_ACL_HEADERS, json=LIST_WEB_ACL_BODY("CLOUDFRONT")
+        "/", headers=LIST_WEB_ACL_HEADERS, json={"Scope": "CLOUDFRONT"}
     )
     assert res.status_code == 200
     web_acls = res.json["WebACLs"]

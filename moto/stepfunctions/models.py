@@ -1,50 +1,146 @@
+from __future__ import annotations
+
 import json
 import re
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Pattern
-
-from dateutil.tz import tzlocal
+from collections.abc import Iterator
+from datetime import datetime, timezone
+from re import Pattern
+from typing import Any, cast
 
 from moto import settings
 from moto.core.base_backend import BackendDict, BaseBackend
 from moto.core.common_models import CloudFormationModel
-from moto.core.utils import iso_8601_datetime_with_milliseconds
+from moto.core.resource_tagging import TaggableResourcesMixin, TaggedResource
+from moto.core.utils import utcnow
 from moto.moto_api._internal import mock_random
 from moto.utilities.paginator import paginate
-from moto.utilities.utils import get_partition
+from moto.utilities.tagging_service import TaggingService
+from moto.utilities.utils import ARN_PARTITION_REGEX, get_partition
 
 from .exceptions import (
+    ActivityAlreadyExists,
+    ActivityDoesNotExist,
     ExecutionAlreadyExists,
     ExecutionDoesNotExist,
     InvalidArn,
+    InvalidEncryptionConfiguration,
     InvalidExecutionInput,
     InvalidName,
     NameTooLongException,
     ResourceNotFound,
     StateMachineDoesNotExist,
 )
+from .parser.api import EncryptionType
 from .utils import PAGINATION_MODEL, api_to_cfn_tags, cfn_to_api_tags
 
 
-class StateMachine(CloudFormationModel):
+class StateMachineInstance:
     def __init__(
         self,
         arn: str,
         name: str,
         definition: str,
         roleArn: str,
-        tags: Optional[List[Dict[str, str]]] = None,
+        encryptionConfiguration: dict[str, Any] | None = None,
+        loggingConfiguration: dict[str, Any] | None = None,
+        tracingConfiguration: dict[str, Any] | None = None,
     ):
-        self.creation_date = iso_8601_datetime_with_milliseconds()
+        self.creation_date = utcnow()
         self.update_date = self.creation_date
         self.arn = arn
         self.name = name
         self.definition = definition
         self.roleArn = roleArn
-        self.executions: List[Execution] = []
-        self.tags: List[Dict[str, str]] = []
-        if tags:
-            self.add_tags(tags)
+        self.executions: list[Execution] = []
+        self.type = "STANDARD"
+        self.encryptionConfiguration = encryptionConfiguration or {
+            "type": "AWS_OWNED_KEY"
+        }
+        self.loggingConfiguration = loggingConfiguration or {"level": "OFF"}
+        self.tracingConfiguration = tracingConfiguration or {"enabled": False}
+        self.sm_type = "STANDARD"  # or express
+        self.description: str | None = None
+
+
+class StateMachineAlias(CloudFormationModel):
+    def __init__(
+        self,
+        name: str,
+        statemachine_arn: str,
+        routing_configuration: list[dict[str, Any]],
+        description: str | None = None,
+    ):
+        self.name = name
+        self.statemachine_arn = statemachine_arn
+        self.arn = f"{statemachine_arn}:{name}"
+        self.description = description
+        self.routing_configuration = routing_configuration
+        self.creation_date = utcnow()
+        self.update_date = self.creation_date
+
+    def update(self, **kwargs: Any) -> None:
+        for key, value in kwargs.items():
+            if value is not None:
+                setattr(self, key, value)
+        self.update_date = utcnow()
+
+
+class StateMachineVersion(StateMachineInstance, CloudFormationModel):
+    def __init__(
+        self, source: StateMachineInstance, version: int, description: str | None
+    ):
+        version_arn = f"{source.arn}:{version}"
+        StateMachineInstance.__init__(
+            self,
+            arn=version_arn,
+            name=source.name,
+            definition=source.definition,
+            roleArn=source.roleArn,
+            encryptionConfiguration=source.encryptionConfiguration,
+            loggingConfiguration=source.loggingConfiguration,
+            tracingConfiguration=source.tracingConfiguration,
+        )
+        self.source_arn = source.arn
+        self.version = version
+        self.description = description
+
+
+class StateMachine(StateMachineInstance, CloudFormationModel):
+    def __init__(
+        self,
+        arn: str,
+        name: str,
+        definition: str,
+        roleArn: str,
+        backend: StepFunctionBackend,
+        encryptionConfiguration: dict[str, Any] | None = None,
+        loggingConfiguration: dict[str, Any] | None = None,
+        tracingConfiguration: dict[str, Any] | None = None,
+    ):
+        StateMachineInstance.__init__(
+            self,
+            arn=arn,
+            name=name,
+            definition=definition,
+            roleArn=roleArn,
+            encryptionConfiguration=encryptionConfiguration,
+            loggingConfiguration=loggingConfiguration,
+            tracingConfiguration=tracingConfiguration,
+        )
+        self.latest_version_number = 0
+        self.versions: dict[int, StateMachineVersion] = {}
+        self.aliases: dict[str, StateMachineAlias] = {}
+        self.latest_version: StateMachineVersion | None = None
+        self.backend = backend
+
+    def publish(self, description: str | None) -> None:
+        new_version_number = self.latest_version_number + 1
+        new_version = StateMachineVersion(
+            source=self, version=new_version_number, description=description
+        )
+        self.versions[new_version_number] = new_version
+        self.latest_version = new_version
+        self.latest_version_number = new_version_number
 
     def start_execution(
         self,
@@ -52,21 +148,27 @@ class StateMachine(CloudFormationModel):
         account_id: str,
         execution_name: str,
         execution_input: str,
-    ) -> "Execution":
-        self._ensure_execution_name_doesnt_exist(execution_name)
+    ) -> Execution:
         self._validate_execution_input(execution_input)
+        existing_execution = self._handle_name_input_idempotency(
+            execution_name, execution_input
+        )
+        if existing_execution is not None:
+            # If we found a match for the name and input, return the existing execution.
+            return existing_execution
+
         execution = Execution(
             region_name=region_name,
             account_id=account_id,
             state_machine_name=self.name,
             execution_name=execution_name,
             state_machine_arn=self.arn,
-            execution_input=json.loads(execution_input),
+            execution_input=execution_input,
         )
         self.executions.append(execution)
         return execution
 
-    def stop_execution(self, execution_arn: str) -> "Execution":
+    def stop_execution(self, execution_arn: str) -> Execution:
         execution = next(
             (x for x in self.executions if x.execution_arn == execution_arn), None
         )
@@ -74,15 +176,26 @@ class StateMachine(CloudFormationModel):
             raise ExecutionDoesNotExist(
                 "Execution Does Not Exist: '" + execution_arn + "'"
             )
-        execution.stop(stop_date=datetime.now(), error="", cause="")
+        execution.stop(stop_date=utcnow(), error="", cause="")
         return execution
 
-    def _ensure_execution_name_doesnt_exist(self, name: str) -> None:
+    def _handle_name_input_idempotency(
+        self, name: str, execution_input: str
+    ) -> Execution | None:
         for execution in self.executions:
             if execution.name == name:
+                # Executions with the same name and input are considered idempotent
+                if (
+                    execution_input == execution.execution_input
+                    and execution.status == "RUNNING"
+                ):
+                    return execution
+
+                # If the inputs are different _or_ the execution already finished, raise
                 raise ExecutionAlreadyExists(
                     "Execution Already Exists: '" + execution.execution_arn + "'"
                 )
+        return None
 
     def _validate_execution_input(self, execution_input: str) -> None:
         try:
@@ -96,34 +209,13 @@ class StateMachine(CloudFormationModel):
         for key, value in kwargs.items():
             if value is not None:
                 setattr(self, key, value)
-        self.update_date = iso_8601_datetime_with_milliseconds()
-
-    def add_tags(self, tags: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        merged_tags = []
-        for tag in self.tags:
-            replacement_index = next(
-                (index for (index, d) in enumerate(tags) if d["key"] == tag["key"]),
-                None,
-            )
-            if replacement_index is not None:
-                replacement = tags.pop(replacement_index)
-                merged_tags.append(replacement)
-            else:
-                merged_tags.append(tag)
-        for tag in tags:
-            merged_tags.append(tag)
-        self.tags = merged_tags
-        return self.tags
-
-    def remove_tags(self, tag_keys: List[str]) -> List[Dict[str, str]]:
-        self.tags = [tag_set for tag_set in self.tags if tag_set["key"] not in tag_keys]
-        return self.tags
+        self.update_date = utcnow()
 
     @property
     def physical_resource_id(self) -> str:
         return self.arn
 
-    def get_cfn_properties(self, prop_overrides: Dict[str, Any]) -> Dict[str, Any]:
+    def get_cfn_properties(self, prop_overrides: dict[str, Any]) -> dict[str, Any]:
         property_names = [
             "DefinitionString",
             "RoleArn",
@@ -164,7 +256,9 @@ class StateMachine(CloudFormationModel):
         elif attribute_name == "StateMachineName":
             return self.name
         elif attribute_name == "Tags":
-            return api_to_cfn_tags(self.tags)
+            return api_to_cfn_tags(
+                self.backend.get_tags_list_for_state_machine(self.arn)
+            )
 
         raise UnformattedGetAttTemplateException()
 
@@ -184,7 +278,7 @@ class StateMachine(CloudFormationModel):
         account_id: str,
         region_name: str,
         **kwargs: Any,
-    ) -> "StateMachine":
+    ) -> StateMachine:
         properties = cloudformation_json["Properties"]
         name = properties.get("StateMachineName", resource_name)
         definition = properties.get("DefinitionString", "")
@@ -212,7 +306,7 @@ class StateMachine(CloudFormationModel):
         cloudformation_json: Any,
         account_id: str,
         region_name: str,
-    ) -> "StateMachine":
+    ) -> StateMachine:
         properties = cloudformation_json.get("Properties", {})
         name = properties.get("StateMachineName", original_resource.name)
 
@@ -237,7 +331,7 @@ class StateMachine(CloudFormationModel):
             state_machine = sf_backend.update_state_machine(
                 original_resource.arn, definition=definition, role_arn=role_arn
             )
-            state_machine.add_tags(tags)
+            sf_backend.tagger.tag_resource(state_machine.arn, tags)
             return state_machine
 
 
@@ -251,13 +345,17 @@ class Execution:
         state_machine_arn: str,
         execution_input: str,
     ):
-        execution_arn = "arn:aws:states:{}:{}:execution:{}:{}"
+        execution_arn = "arn:{}:states:{}:{}:execution:{}:{}"
         execution_arn = execution_arn.format(
-            region_name, account_id, state_machine_name, execution_name
+            get_partition(region_name),
+            region_name,
+            account_id,
+            state_machine_name,
+            execution_name,
         )
         self.execution_arn = execution_arn
         self.name = execution_name
-        self.start_date = iso_8601_datetime_with_milliseconds()
+        self.start_date = utcnow()
         self.state_machine_arn = state_machine_arn
         self.execution_input = execution_input
         self.status = (
@@ -265,22 +363,21 @@ class Execution:
             if settings.get_sf_execution_history_type() == "SUCCESS"
             else "FAILED"
         )
-        self.stop_date: Optional[str] = None
+        self.stop_date: datetime | None = None
         self.account_id = account_id
         self.region_name = region_name
-        self.output: Optional[str] = None
-        self.output_details: Optional[str] = None
-        self.cause: Optional[str] = None
-        self.error: Optional[str] = None
+        self.output: str | None = None
+        self.output_details: str | None = None
+        self.cause: str | None = None
+        self.error: str | None = None
 
-    def get_execution_history(self, roleArn: str) -> List[Dict[str, Any]]:
+    def get_execution_history(self, roleArn: str) -> list[dict[str, Any]]:
         sf_execution_history_type = settings.get_sf_execution_history_type()
+        tz = timezone.utc
         if sf_execution_history_type == "SUCCESS":
             return [
                 {
-                    "timestamp": iso_8601_datetime_with_milliseconds(
-                        datetime(2020, 1, 1, 0, 0, 0, tzinfo=tzlocal())
-                    ),
+                    "timestamp": datetime(2020, 1, 1, 0, 0, 0, tzinfo=tz),
                     "type": "ExecutionStarted",
                     "id": 1,
                     "previousEventId": 0,
@@ -291,9 +388,7 @@ class Execution:
                     },
                 },
                 {
-                    "timestamp": iso_8601_datetime_with_milliseconds(
-                        datetime(2020, 1, 1, 0, 0, 10, tzinfo=tzlocal())
-                    ),
+                    "timestamp": datetime(2020, 1, 1, 0, 0, 10, tzinfo=tz),
                     "type": "PassStateEntered",
                     "id": 2,
                     "previousEventId": 0,
@@ -304,9 +399,7 @@ class Execution:
                     },
                 },
                 {
-                    "timestamp": iso_8601_datetime_with_milliseconds(
-                        datetime(2020, 1, 1, 0, 0, 10, tzinfo=tzlocal())
-                    ),
+                    "timestamp": datetime(2020, 1, 1, 0, 0, 10, tzinfo=tz),
                     "type": "PassStateExited",
                     "id": 3,
                     "previousEventId": 2,
@@ -317,9 +410,7 @@ class Execution:
                     },
                 },
                 {
-                    "timestamp": iso_8601_datetime_with_milliseconds(
-                        datetime(2020, 1, 1, 0, 0, 20, tzinfo=tzlocal())
-                    ),
+                    "timestamp": datetime(2020, 1, 1, 0, 0, 20, tzinfo=tz),
                     "type": "ExecutionSucceeded",
                     "id": 4,
                     "previousEventId": 3,
@@ -332,9 +423,7 @@ class Execution:
         elif sf_execution_history_type == "FAILURE":
             return [
                 {
-                    "timestamp": iso_8601_datetime_with_milliseconds(
-                        datetime(2020, 1, 1, 0, 0, 0, tzinfo=tzlocal())
-                    ),
+                    "timestamp": datetime(2020, 1, 1, 0, 0, 0, tzinfo=tz),
                     "type": "ExecutionStarted",
                     "id": 1,
                     "previousEventId": 0,
@@ -345,9 +434,7 @@ class Execution:
                     },
                 },
                 {
-                    "timestamp": iso_8601_datetime_with_milliseconds(
-                        datetime(2020, 1, 1, 0, 0, 10, tzinfo=tzlocal())
-                    ),
+                    "timestamp": datetime(2020, 1, 1, 0, 0, 10, tzinfo=tz),
                     "type": "FailStateEntered",
                     "id": 2,
                     "previousEventId": 0,
@@ -358,9 +445,7 @@ class Execution:
                     },
                 },
                 {
-                    "timestamp": iso_8601_datetime_with_milliseconds(
-                        datetime(2020, 1, 1, 0, 0, 10, tzinfo=tzlocal())
-                    ),
+                    "timestamp": datetime(2020, 1, 1, 0, 0, 10, tzinfo=tz),
                     "type": "ExecutionFailed",
                     "id": 3,
                     "previousEventId": 2,
@@ -374,10 +459,25 @@ class Execution:
 
     def stop(self, *args: Any, **kwargs: Any) -> None:
         self.status = "ABORTED"
-        self.stop_date = iso_8601_datetime_with_milliseconds()
+        self.stop_date = utcnow()
 
 
-class StepFunctionBackend(BaseBackend):
+class Activity:
+    def __init__(
+        self,
+        arn: str,
+        name: str,
+        encryption_configuration: dict[str, Any] | None = None,
+    ):
+        self.arn = arn
+        self.name = name
+        self.encryption_configuration = encryption_configuration
+
+        self.creation_date = utcnow()
+        self.update_date = self.creation_date
+
+
+class StepFunctionBackend(BaseBackend, TaggableResourcesMixin):
     """
     Configure Moto to explicitly parse and execute the StateMachine:
 
@@ -495,18 +595,31 @@ class StepFunctionBackend(BaseBackend):
         "\u009f",
     ]
     accepted_role_arn_format = re.compile(
-        r"arn:(aws|aws-cn|aws-us-gov|aws-iso|aws-iso-b):iam::(?P<account_id>[0-9]{12}):role/.+"
+        ARN_PARTITION_REGEX + r":iam::(?P<account_id>[0-9]{12}):role/.+"
     )
     accepted_mchn_arn_format = re.compile(
-        r"arn:(aws|aws-cn|aws-us-gov|aws-iso|aws-iso-b):states:[-0-9a-zA-Z]+:(?P<account_id>[0-9]{12}):stateMachine:.+"
+        ARN_PARTITION_REGEX
+        + r":states:[-0-9a-zA-Z]+:(?P<account_id>[0-9]{12}):stateMachine:.+"
     )
     accepted_exec_arn_format = re.compile(
-        r"arn:(aws|aws-cn|aws-us-gov|aws-iso|aws-iso-b):states:[-0-9a-zA-Z]+:(?P<account_id>[0-9]{12}):execution:.+"
+        ARN_PARTITION_REGEX
+        + r":states:[-0-9a-zA-Z]+:(?P<account_id>[0-9]{12}):execution:.+"
     )
+    accepted_activity_arn_format = re.compile(
+        ARN_PARTITION_REGEX
+        + r":states:[-0-9a-zA-Z]+:(?P<account_id>[0-9]{12}):activity:.+"
+    )
+
+    SERVICE_NAMESPACE = "states"
 
     def __init__(self, region_name: str, account_id: str):
         super().__init__(region_name, account_id)
-        self.state_machines: List[StateMachine] = []
+        self.tagger = TaggingService(
+            tag_name="tags", key_name="key", value_name="value"
+        )
+
+        self.state_machines: list[StateMachine] = []
+        self.activities: dict[str, Activity] = {}
         self._account_id = None
 
     def create_state_machine(
@@ -514,7 +627,12 @@ class StepFunctionBackend(BaseBackend):
         name: str,
         definition: str,
         roleArn: str,
-        tags: Optional[List[Dict[str, str]]] = None,
+        tags: list[dict[str, str]] | None = None,
+        publish: bool | None = None,
+        loggingConfiguration: dict[str, Any] | None = None,
+        tracingConfiguration: dict[str, Any] | None = None,
+        encryptionConfiguration: dict[str, Any] | None = None,
+        version_description: str | None = None,
     ) -> StateMachine:
         self._validate_name(name)
         self._validate_role_arn(roleArn)
@@ -522,22 +640,103 @@ class StepFunctionBackend(BaseBackend):
         try:
             return self.describe_state_machine(arn)
         except StateMachineDoesNotExist:
-            state_machine = StateMachine(arn, name, definition, roleArn, tags)
+            state_machine = StateMachine(
+                arn,
+                name,
+                definition,
+                roleArn,
+                self,
+                encryptionConfiguration,
+                loggingConfiguration,
+                tracingConfiguration,
+            )
+            if publish:
+                state_machine.publish(description=version_description)
+
+            if tags:
+                self.tagger.tag_resource(arn, tags)
+
             self.state_machines.append(state_machine)
             return state_machine
 
+    def create_state_machine_alias(
+        self,
+        name: str,
+        routing_configuration: list[dict[str, Any]],
+        description: str | None,
+    ) -> StateMachineAlias:
+        state_version_arn = routing_configuration[0]["stateMachineVersionArn"]
+        # Get the corresponding sm version
+        sm_version, sm = next(
+            (
+                (v, sm)
+                for sm in self.state_machines
+                for v in sm.versions.values()
+                if v.arn == state_version_arn
+            ),
+            (None, None),
+        )
+        if not sm_version:
+            raise StateMachineDoesNotExist(
+                f"State Machine Version Does Not Exist: '{state_version_arn}'"
+            )
+
+        # if sm_version exists then sm exists
+        sm = cast(StateMachine, sm)
+        alias = StateMachineAlias(name, sm.arn, routing_configuration, description)
+        sm.aliases[name] = alias
+        return alias
+
     @paginate(pagination_model=PAGINATION_MODEL)
-    def list_state_machines(self) -> List[StateMachine]:
+    def list_state_machines(self) -> list[StateMachine]:
         return sorted(self.state_machines, key=lambda x: x.creation_date)
+
+    @paginate(pagination_model=PAGINATION_MODEL)
+    def list_state_machine_aliases(self, arn: str) -> list[StateMachineAlias]:
+        sm = next((x for x in self.state_machines if x.arn == arn), None)
+        if not sm:
+            raise StateMachineDoesNotExist(f"State Machine Does Not Exist: '{arn}'")
+        return sorted(sm.aliases.values(), key=lambda x: x.creation_date)
 
     def describe_state_machine(self, arn: str) -> StateMachine:
         self._validate_machine_arn(arn)
         sm = next((x for x in self.state_machines if x.arn == arn), None)
         if not sm:
+            if (
+                (arn_parts := arn.split(":"))
+                and len(arn_parts) > 7
+                and arn_parts[-1].isnumeric()
+            ):
+                # we might have a versioned arn, ending in :stateMachine:name:version_nr
+                source_arn = ":".join(arn_parts[:-1])
+                source_sm = next(
+                    (x for x in self.state_machines if x.arn == source_arn), None
+                )
+                if source_sm:
+                    sm = source_sm.versions.get(int(arn_parts[-1]))  # type: ignore[assignment]
+        if not sm:
+            raise StateMachineDoesNotExist(f"State Machine Does Not Exist: '{arn}'")
+        return sm  # type: ignore[return-value]
+
+    def describe_state_machine_alias(self, arn: str) -> StateMachineAlias:
+        arn_parts = arn.rsplit(":", 1)
+
+        state_machine_arn = arn_parts[0]
+        alias_name = arn_parts[1]
+
+        self._validate_machine_arn(state_machine_arn)
+
+        sm = next((x for x in self.state_machines if x.arn == state_machine_arn), None)
+        if not sm:
             raise StateMachineDoesNotExist(
-                "State Machine Does Not Exist: '" + arn + "'"
+                f"State Machine Does Not Exist: '{state_machine_arn}'"
             )
-        return sm
+
+        alias = sm.aliases.get(alias_name)
+        if not alias:
+            raise ResourceNotFound(f"State Machine Alias Does Not Exist: '{arn}'")
+
+        return alias
 
     def delete_state_machine(self, arn: str) -> None:
         self._validate_machine_arn(arn)
@@ -545,16 +744,66 @@ class StepFunctionBackend(BaseBackend):
         if sm:
             self.state_machines.remove(sm)
 
+    def delete_state_machine_alias(self, arn: str) -> None:
+        arn_parts = arn.rsplit(":", 1)
+        state_machine_arn = arn_parts[0]
+        alias_name = arn_parts[1]
+
+        self._validate_machine_arn(state_machine_arn)
+
+        sm = next((x for x in self.state_machines if x.arn == state_machine_arn), None)
+        if not sm:
+            raise StateMachineDoesNotExist(
+                f"State Machine Does Not Exist: '{state_machine_arn}'"
+            )
+
+        if alias_name not in sm.aliases:
+            raise ResourceNotFound(f"State Machine Alias Does Not Exist: '{arn}'")
+
+        del sm.aliases[alias_name]
+
     def update_state_machine(
-        self, arn: str, definition: Optional[str] = None, role_arn: Optional[str] = None
+        self,
+        arn: str,
+        definition: str | None = None,
+        role_arn: str | None = None,
+        logging_configuration: dict[str, bool] | None = None,
+        tracing_configuration: dict[str, bool] | None = None,
+        encryption_configuration: dict[str, Any] | None = None,
+        publish: bool | None = None,
+        version_description: str | None = None,
     ) -> StateMachine:
         sm = self.describe_state_machine(arn)
-        updates = {
+        updates: dict[str, Any] = {
             "definition": definition,
             "roleArn": role_arn,
         }
+        if encryption_configuration:
+            updates["encryptionConfiguration"] = encryption_configuration
+        if logging_configuration:
+            updates["loggingConfiguration"] = logging_configuration
+        if tracing_configuration:
+            updates["tracingConfiguration"] = tracing_configuration
         sm.update(**updates)
+        if publish:
+            sm.publish(version_description)
         return sm
+
+    def update_state_machine_alias(
+        self,
+        arn: str,
+        description: str | None,
+        routing_configuration: list[dict[str, Any]] | None,
+    ) -> StateMachineAlias:
+        alias = self.describe_state_machine_alias(arn=arn)
+
+        if routing_configuration:
+            alias.update(routing_configuration=routing_configuration)
+
+        if description is not None:
+            alias.update(description=description)
+
+        return alias
 
     def start_execution(
         self, state_machine_arn: str, name: str, execution_input: str
@@ -576,8 +825,8 @@ class StepFunctionBackend(BaseBackend):
 
     @paginate(pagination_model=PAGINATION_MODEL)
     def list_executions(
-        self, state_machine_arn: str, status_filter: Optional[str] = None
-    ) -> List[Execution]:
+        self, state_machine_arn: str, status_filter: str | None = None
+    ) -> list[Execution]:
         executions = self.describe_state_machine(state_machine_arn).executions
 
         if status_filter:
@@ -598,7 +847,7 @@ class StepFunctionBackend(BaseBackend):
             )
         return exctn
 
-    def get_execution_history(self, execution_arn: str) -> List[Dict[str, Any]]:
+    def get_execution_history(self, execution_arn: str) -> dict[str, Any]:
         self._validate_execution_arn(execution_arn)
         state_machine = self._get_state_machine_for_execution(execution_arn)
         execution = next(
@@ -609,7 +858,7 @@ class StepFunctionBackend(BaseBackend):
             raise ExecutionDoesNotExist(
                 "Execution Does Not Exist: '" + execution_arn + "'"
             )
-        return execution.get_execution_history(state_machine.roleArn)
+        return {"events": execution.get_execution_history(state_machine.roleArn)}
 
     def describe_state_machine_for_execution(self, execution_arn: str) -> StateMachine:
         for sm in self.state_machines:
@@ -618,28 +867,13 @@ class StepFunctionBackend(BaseBackend):
                     return sm
         raise ResourceNotFound(execution_arn)
 
-    def list_tags_for_resource(self, arn: str) -> List[Dict[str, str]]:
-        try:
-            state_machine = self.describe_state_machine(arn)
-            return state_machine.tags or []
-        except StateMachineDoesNotExist:
-            return []
+    def list_tags_for_resource(self, arn: str) -> dict[str, list[dict[str, str]]]:
+        return self.tagger.list_tags_for_resource(arn)
 
-    def tag_resource(self, resource_arn: str, tags: List[Dict[str, str]]) -> None:
-        try:
-            state_machine = self.describe_state_machine(resource_arn)
-            state_machine.add_tags(tags)
-        except StateMachineDoesNotExist:
-            raise ResourceNotFound(resource_arn)
+    def get_tags_list_for_state_machine(self, arn: str) -> list[dict[str, str]]:
+        return self.list_tags_for_resource(arn)[self.tagger.tag_name]
 
-    def untag_resource(self, resource_arn: str, tag_keys: List[str]) -> None:
-        try:
-            state_machine = self.describe_state_machine(resource_arn)
-            state_machine.remove_tags(tag_keys)
-        except StateMachineDoesNotExist:
-            raise ResourceNotFound(resource_arn)
-
-    def send_task_failure(self, task_token: str, error: Optional[str] = None) -> None:
+    def send_task_failure(self, task_token: str, error: str | None = None) -> None:
         pass
 
     def send_task_heartbeat(self, task_token: str) -> None:
@@ -648,7 +882,7 @@ class StepFunctionBackend(BaseBackend):
     def send_task_success(self, task_token: str, outcome: str) -> None:
         pass
 
-    def describe_map_run(self, map_run_arn: str) -> Dict[str, Any]:
+    def describe_map_run(self, map_run_arn: str) -> dict[str, Any]:
         return {}
 
     def list_map_runs(self, execution_arn: str) -> Any:
@@ -694,10 +928,34 @@ class StepFunctionBackend(BaseBackend):
             invalid_msg="Execution Does Not Exist: '" + execution_arn + "'",
         )
 
+    def _validate_activity_arn(self, activity_arn: str) -> None:
+        self._validate_arn(
+            arn=activity_arn,
+            regex=self.accepted_activity_arn_format,
+            invalid_msg="Invalid Activity Arn: '" + activity_arn + "'",
+        )
+
     def _validate_arn(self, arn: str, regex: Pattern[str], invalid_msg: str) -> None:
         match = regex.match(arn)
         if not arn or not match:
             raise InvalidArn(invalid_msg)
+
+    def _validate_encryption_configuration(
+        self, encryption_configuration: dict[str, Any]
+    ) -> None:
+        encryption_type = encryption_configuration.get("type")
+        if not encryption_type:
+            raise InvalidEncryptionConfiguration(
+                "Invalid Encryption Configuration: 'type' is required."
+            )
+
+        if (
+            encryption_type == EncryptionType.CUSTOMER_MANAGED_KMS_KEY
+            and not encryption_configuration.get("kmsKeyId")
+        ):
+            raise InvalidEncryptionConfiguration(
+                "Invalid Encryption Configuration: 'kmsKeyId' is required when 'type' is 'CUSTOMER_MANAGED_KMS_KEY'"
+            )
 
     def _get_state_machine_for_execution(self, execution_arn: str) -> StateMachine:
         state_machine_name = execution_arn.split(":")[6]
@@ -711,6 +969,65 @@ class StepFunctionBackend(BaseBackend):
                 "Execution Does Not Exist: '" + execution_arn + "'"
             )
         return self.describe_state_machine(state_machine_arn)
+
+    def create_activity(
+        self,
+        name: str,
+        tags: list[dict[str, str]] | None = None,
+        encryption_configuration: dict[str, Any] | None = None,
+    ) -> Activity:
+        self._validate_name(name)
+
+        if encryption_configuration is not None:
+            self._validate_encryption_configuration(encryption_configuration)
+
+        arn = f"arn:{get_partition(self.region_name)}:states:{self.region_name}:{self.account_id}:activity:{name}"
+
+        if arn in self.activities:
+            raise ActivityAlreadyExists("Activity already exists.")
+
+        activity = Activity(
+            arn=arn,
+            name=name,
+            encryption_configuration=encryption_configuration,
+        )
+        self.activities[arn] = activity
+
+        if tags:
+            self.tagger.tag_resource(arn, tags)
+
+        return activity
+
+    def describe_activity(self, activity_arn: str) -> Activity:
+        self._validate_activity_arn(activity_arn)
+        if activity_arn in self.activities:
+            return self.activities[activity_arn]
+        else:
+            raise ActivityDoesNotExist(activity_arn)
+
+    def delete_activity(self, activity_arn: str) -> None:
+        self._validate_activity_arn(activity_arn)
+        if activity_arn in self.activities:
+            del self.activities[activity_arn]
+
+    @paginate(pagination_model=PAGINATION_MODEL)
+    def list_activities(self) -> list[Activity]:
+        return sorted(self.activities.values(), key=lambda x: x.creation_date)
+
+    # Resource Groups Tagging API (TaggableResourcesMixin method overrides)
+    def iter_tagged_resources(self) -> Iterator[TaggedResource]:
+        for sm in self.state_machines:
+            yield TaggedResource(
+                arn=sm.arn,
+                tags=self.tagger.get_tag_dict_for_resource(sm.arn),
+                resource_type="states:stateMachine",
+            )
+
+    def tag_resource(self, arn: str, tags: dict[str, str]) -> None:
+        self.tagger.tag_resource(arn, [{"key": k, "value": v} for k, v in tags.items()])
+
+    def untag_resource(self, arn: str, tag_keys: list[str]) -> None:
+        self.tagger.untag_resource_using_names(arn, tag_keys)
 
 
 stepfunctions_backends = BackendDict(StepFunctionBackend, "stepfunctions")

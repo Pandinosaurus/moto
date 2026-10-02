@@ -1,17 +1,38 @@
+from __future__ import annotations
+
 import re
 from collections import deque, namedtuple
-from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple, Union
+from collections.abc import Iterable
+from decimal import Decimal
+from typing import Any
 
-from moto.dynamodb.exceptions import ConditionAttributeIsReservedKeyword
+from moto.dynamodb.exceptions import (
+    ConditionAttributeIsReservedKeyword,
+    InvalidConditionExpression,
+)
 from moto.dynamodb.models.dynamo_type import Item
 from moto.dynamodb.parsing.reserved_keywords import ReservedKeywords
 
 
+class IncorrectOperandType(ValueError):
+    def __init__(self, op_or_func: str, op_type: str):
+        message = f"Incorrect operand type for operator or function; operator or function: {op_or_func}, operand type: {op_type}"
+        super().__init__(message)
+
+
+def create_condition_expression_parser(
+    expr: str | None,
+    names: dict[str, str] | None,
+    values: dict[str, dict[str, str]] | None,
+) -> ConditionExpressionParser:
+    return ConditionExpressionParser(expr, names, values)
+
+
 def get_filter_expression(
-    expr: Optional[str],
-    names: Optional[Dict[str, str]],
-    values: Optional[Dict[str, Dict[str, str]]],
-) -> Union["Op", "Func"]:
+    expr: str | None,
+    names: dict[str, str] | None,
+    values: dict[str, dict[str, str]] | None,
+) -> Op | Func:
     """
     Parse a filter expression into an Op.
 
@@ -19,11 +40,11 @@ def get_filter_expression(
         expr = 'Id > 5 AND attribute_exists(test) AND Id BETWEEN 5 AND 6 OR length < 6 AND contains(test, 1) AND 5 IN (4,5, 6) OR (Id < 5 AND 5 > Id)'
         expr = 'Id > 5 AND Subs < 7'
     """
-    parser = ConditionExpressionParser(expr, names, values)
+    parser = create_condition_expression_parser(expr, names, values)
     return parser.parse()
 
 
-def get_expected(expected: Dict[str, Any]) -> Union["Op", "Func"]:
+def get_expected(expected: dict[str, Any]) -> Op | Func:
     """
     Parse a filter expression into an Op.
 
@@ -31,7 +52,7 @@ def get_expected(expected: Dict[str, Any]) -> Union["Op", "Func"]:
         expr = 'Id > 5 AND attribute_exists(test) AND Id BETWEEN 5 AND 6 OR length < 6 AND contains(test, 1) AND 5 IN (4,5, 6) OR (Id < 5 AND 5 > Id)'
         expr = 'Id > 5 AND Subs < 7'
     """
-    ops: Dict[str, Any] = {
+    ops: dict[str, Any] = {
         "EQ": OpEqual,
         "NE": OpNotEqual,
         "LE": OpLessThanOrEqual,
@@ -48,7 +69,7 @@ def get_expected(expected: Dict[str, Any]) -> Union["Op", "Func"]:
     }
 
     # NOTE: Always uses ConditionalOperator=AND
-    conditions: List[Union["Op", "Func"]] = []
+    conditions: list[Op | Func] = []
     for key, cond in expected.items():
         path = AttributePath([key])
         if "Exists" in cond:
@@ -83,13 +104,11 @@ class Op:
 
     OP = ""
 
-    def __init__(
-        self, lhs: Union["Func", "Op", "Operand"], rhs: Union["Func", "Op", "Operand"]
-    ):
+    def __init__(self, lhs: Func | Op | Operand, rhs: Func | Op | Operand):
         self.lhs = lhs
         self.rhs = rhs
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         raise NotImplementedError(f"Expr not defined for {type(self)}")
 
     def __repr__(self) -> str:
@@ -143,15 +162,18 @@ class RecursionStopIteration(StopIteration):
 class ConditionExpressionParser:
     def __init__(
         self,
-        condition_expression: Optional[str],
-        expression_attribute_names: Optional[Dict[str, str]],
-        expression_attribute_values: Optional[Dict[str, Dict[str, str]]],
+        condition_expression: str | None,
+        expression_attribute_names: dict[str, str] | None,
+        expression_attribute_values: dict[str, dict[str, str]] | None,
     ):
         self.condition_expression = condition_expression
         self.expression_attribute_names = expression_attribute_names
         self.expression_attribute_values = expression_attribute_values
 
-    def parse(self) -> Union[Op, "Func"]:
+        self.expr_attr_names_found: list[str] = []
+        self.expr_attr_values_found: list[str] = []
+
+    def parse(self) -> Op | Func:
         """Returns a syntax tree for the expression.
 
         The tree, and all of the nodes in the tree are a tuple of
@@ -202,6 +224,11 @@ class ConditionExpressionParser:
         nodes = self._apply_between(nodes)
         nodes = self._apply_parens_and_booleans(nodes)
         node = nodes[0]
+        self._assert_no_redundant_parentheses(node)
+
+        self.expr_attr_names_found.extend(self._find_literals(node))
+        self.expr_attr_values_found.extend(self._find_expr_attr_values(node))
+
         op = self._make_op_condition(node)
         return op
 
@@ -249,12 +276,35 @@ class ConditionExpressionParser:
     Node = namedtuple("Node", ["nonterminal", "kind", "text", "value", "children"])
 
     @classmethod
+    def _find_literals(cls, parent: Node) -> list[str]:  # type: ignore
+        literals: list[str] = []
+        if (
+            parent.kind == cls.Kind.LITERAL
+            and parent.nonterminal == cls.Nonterminal.IDENTIFIER
+        ):
+            literals.append(parent.text)
+        else:
+            for child in parent.children:
+                literals.extend(cls._find_literals(child))
+        return literals
+
+    @classmethod
+    def _find_expr_attr_values(cls, parent: Node) -> list[str]:  # type: ignore
+        literals: list[str] = []
+        if parent.kind == ConditionExpressionParser.Kind.EXPRESSION_ATTRIBUTE_VALUE:
+            literals.append(parent.text)
+        else:
+            for child in parent.children:
+                literals.extend(cls._find_expr_attr_values(child))
+        return literals
+
+    @classmethod
     def raise_exception_if_keyword(cls, attribute: str) -> None:
         if attribute.upper() in ReservedKeywords.get_reserved_keywords():
             raise ConditionAttributeIsReservedKeyword(attribute)
 
-    def _lex_condition_expression(self) -> Deque[Node]:
-        nodes: Deque[ConditionExpressionParser.Node] = deque()
+    def _lex_condition_expression(self) -> deque[Node]:
+        nodes: deque[ConditionExpressionParser.Node] = deque()
         remaining_expression = self.condition_expression
         while remaining_expression:
             node, remaining_expression = self._lex_one_node(remaining_expression)
@@ -263,7 +313,7 @@ class ConditionExpressionParser:
             nodes.append(node)
         return nodes
 
-    def _lex_one_node(self, remaining_expression: str) -> Tuple[Node, str]:
+    def _lex_one_node(self, remaining_expression: str) -> tuple[Node, str]:
         # TODO: Handle indexing like [1]
         attribute_regex = r"(:|#)?[A-z0-9\-_]+"
         patterns = [
@@ -294,26 +344,21 @@ class ConditionExpressionParser:
             match = pattern.match(remaining_expression)
             if match:
                 match_text = match.group()
-                break
-        else:  # pragma: no cover
-            raise ValueError(
-                f"Cannot parse condition starting at:{remaining_expression}"
-            )
+                node = self.Node(
+                    nonterminal=nonterminal,
+                    kind=self.Kind.LITERAL,
+                    text=match_text,
+                    value=match_text,
+                    children=[],
+                )
 
-        node = self.Node(
-            nonterminal=nonterminal,
-            kind=self.Kind.LITERAL,
-            text=match_text,
-            value=match_text,
-            children=[],
-        )
+                remaining_expression = remaining_expression[len(match_text) :]
 
-        remaining_expression = remaining_expression[len(match_text) :]
+                return node, remaining_expression
+        raise ValueError(f"Cannot parse condition starting at:{remaining_expression}")
 
-        return node, remaining_expression
-
-    def _parse_paths(self, nodes: Deque[Node]) -> Deque[Node]:
-        output: Deque[ConditionExpressionParser.Node] = deque()
+    def _parse_paths(self, nodes: deque[Node]) -> deque[Node]:
+        output: deque[ConditionExpressionParser.Node] = deque()
 
         while nodes:
             node = nodes.popleft()
@@ -423,7 +468,7 @@ class ConditionExpressionParser:
                 children=[],
             )
 
-    def _lookup_expression_attribute_value(self, name: str) -> Dict[str, str]:
+    def _lookup_expression_attribute_value(self, name: str) -> dict[str, str]:
         return self.expression_attribute_values[name]  # type: ignore[index]
 
     def _lookup_expression_attribute_name(self, name: str) -> str:
@@ -471,7 +516,7 @@ class ConditionExpressionParser:
     #     contains (path, operand)
     #     size (path)
 
-    def _matches(self, nodes: Deque[Node], production: List[str]) -> bool:
+    def _matches(self, nodes: deque[Node], production: list[str]) -> bool:
         """Check if the nodes start with the given production.
 
         Parameters
@@ -491,9 +536,9 @@ class ConditionExpressionParser:
                 return False
         return True
 
-    def _apply_comparator(self, nodes: Deque[Node]) -> Deque[Node]:
+    def _apply_comparator(self, nodes: deque[Node]) -> deque[Node]:
         """Apply condition := operand comparator operand."""
-        output: Deque[ConditionExpressionParser.Node] = deque()
+        output: deque[ConditionExpressionParser.Node] = deque()
 
         while nodes:
             if self._matches(nodes, ["*", "COMPARATOR"]):
@@ -518,9 +563,9 @@ class ConditionExpressionParser:
                 output.append(nodes.popleft())
         return output
 
-    def _apply_in(self, nodes: Deque[Node]) -> Deque[Node]:
+    def _apply_in(self, nodes: deque[Node]) -> deque[Node]:
         """Apply condition := operand IN ( operand , ... )."""
-        output: Deque[ConditionExpressionParser.Node] = deque()
+        output: deque[ConditionExpressionParser.Node] = deque()
         while nodes:
             if self._matches(nodes, ["*", "IN"]):
                 self._assert(
@@ -560,9 +605,9 @@ class ConditionExpressionParser:
                 output.append(nodes.popleft())
         return output
 
-    def _apply_between(self, nodes: Deque[Node]) -> Deque[Node]:
+    def _apply_between(self, nodes: deque[Node]) -> deque[Node]:
         """Apply condition := operand BETWEEN operand AND operand."""
-        output: Deque[ConditionExpressionParser.Node] = deque()
+        output: deque[ConditionExpressionParser.Node] = deque()
         while nodes:
             if self._matches(nodes, ["*", "BETWEEN"]):
                 self._assert(
@@ -591,9 +636,9 @@ class ConditionExpressionParser:
                 output.append(nodes.popleft())
         return output
 
-    def _apply_functions(self, nodes: Deque[Node]) -> Deque[Node]:
+    def _apply_functions(self, nodes: deque[Node]) -> deque[Node]:
         """Apply condition := function_name (operand , ...)."""
-        output: Deque[ConditionExpressionParser.Node] = deque()
+        output: deque[ConditionExpressionParser.Node] = deque()
         either_kind = {self.Kind.PATH, self.Kind.EXPRESSION_ATTRIBUTE_VALUE}
         expected_argument_kind_map = {
             "attribute_exists": [{self.Kind.PATH}],
@@ -664,10 +709,10 @@ class ConditionExpressionParser:
         return output
 
     def _apply_parens_and_booleans(
-        self, nodes: Deque[Node], left_paren: Any = None
-    ) -> Deque[Node]:
+        self, nodes: deque[Node], left_paren: Any = None
+    ) -> deque[Node]:
         """Apply condition := ( condition ) and booleans."""
-        output: Deque[ConditionExpressionParser.Node] = deque()
+        output: deque[ConditionExpressionParser.Node] = deque()
         while nodes:
             if self._matches(nodes, ["LEFT_PAREN"]):
                 parsed = self._apply_parens_and_booleans(
@@ -705,7 +750,7 @@ class ConditionExpressionParser:
         self._assert(left_paren is None, "Unmatched ( at", list(output))
         return self._apply_booleans(output)
 
-    def _apply_booleans(self, nodes: Deque[Node]) -> Deque[Node]:
+    def _apply_booleans(self, nodes: deque[Node]) -> deque[Node]:
         """Apply and, or, and not constructions."""
         nodes = self._apply_not(nodes)
         nodes = self._apply_and(nodes)
@@ -719,9 +764,9 @@ class ConditionExpressionParser:
         )
         return nodes
 
-    def _apply_not(self, nodes: Deque[Node]) -> Deque[Node]:
+    def _apply_not(self, nodes: deque[Node]) -> deque[Node]:
         """Apply condition := NOT condition."""
-        output: Deque[ConditionExpressionParser.Node] = deque()
+        output: deque[ConditionExpressionParser.Node] = deque()
         while nodes:
             if self._matches(nodes, ["NOT"]):
                 self._assert(
@@ -745,9 +790,9 @@ class ConditionExpressionParser:
 
         return output
 
-    def _apply_and(self, nodes: Deque[Node]) -> Deque[Node]:
+    def _apply_and(self, nodes: deque[Node]) -> deque[Node]:
         """Apply condition := condition AND condition."""
-        output: Deque[ConditionExpressionParser.Node] = deque()
+        output: deque[ConditionExpressionParser.Node] = deque()
         while nodes:
             if self._matches(nodes, ["*", "AND"]):
                 self._assert(
@@ -773,9 +818,9 @@ class ConditionExpressionParser:
 
         return output
 
-    def _apply_or(self, nodes: Deque[Node]) -> Deque[Node]:
+    def _apply_or(self, nodes: deque[Node]) -> deque[Node]:
         """Apply condition := condition OR condition."""
-        output: Deque[ConditionExpressionParser.Node] = deque()
+        output: deque[ConditionExpressionParser.Node] = deque()
         while nodes:
             if self._matches(nodes, ["*", "OR"]):
                 self._assert(
@@ -801,7 +846,7 @@ class ConditionExpressionParser:
 
         return output
 
-    def _make_operand(self, node: Node) -> "Operand":
+    def _make_operand(self, node: Node) -> Operand:
         if node.kind == self.Kind.PATH:
             return AttributePath([child.value for child in node.children])
         elif node.kind == self.Kind.EXPRESSION_ATTRIBUTE_VALUE:
@@ -816,7 +861,7 @@ class ConditionExpressionParser:
         else:  # pragma: no cover
             raise ValueError(f"Unknown operand: {node}")
 
-    def _make_op_condition(self, node: Node) -> Union["Func", Op]:
+    def _make_op_condition(self, node: Node) -> Func | Op:
         if node.kind == self.Kind.OR:
             lhs, rhs = node.children
             return OpOr(self._make_op_condition(lhs), self._make_op_condition(rhs))
@@ -856,21 +901,41 @@ class ConditionExpressionParser:
         else:  # pragma: no cover
             raise ValueError(f"Unknown expression node kind {node.kind}")
 
+    def _assert_no_redundant_parentheses(
+        self, node: Node, parent_kind: str | None = None
+    ) -> None:
+        if node.kind == self.Kind.PARENTHESES:
+            (child,) = node.children
+            if self._is_redundant_parenthesized_child(parent_kind, child.kind):
+                raise InvalidConditionExpression(
+                    "The expression has redundant parentheses;"
+                )
+            self._assert_no_redundant_parentheses(child, parent_kind)
+            return
+
+        for child in node.children:
+            self._assert_no_redundant_parentheses(child, node.kind)
+
+    def _is_redundant_parenthesized_child(
+        self, parent_kind: str | None, child_kind: str
+    ) -> bool:
+        return child_kind == self.Kind.PARENTHESES
+
     def _assert(self, condition: bool, message: str, nodes: Iterable[Node]) -> None:
         if not condition:
             raise ValueError(message + " " + " ".join([t.text for t in nodes]))
 
 
 class Operand:
-    def expr(self, item: Optional[Item]) -> Any:
+    def expr(self, item: Item | None) -> Any:
         raise NotImplementedError
 
-    def get_type(self, item: Optional[Item]) -> Optional[str]:
+    def get_type(self, item: Item | None) -> str | None:
         raise NotImplementedError
 
 
 class AttributePath(Operand):
-    def __init__(self, path: List[Any]):
+    def __init__(self, path: list[Any]):
         """Initialize the AttributePath.
 
         Parameters
@@ -881,7 +946,7 @@ class AttributePath(Operand):
         assert len(path) >= 1
         self.path = path
 
-    def _get_attr(self, item: Optional[Item]) -> Any:
+    def _get_attr(self, item: Item | None) -> Any:
         if item is None:
             return None
 
@@ -897,14 +962,14 @@ class AttributePath(Operand):
 
         return attr
 
-    def expr(self, item: Optional[Item]) -> Any:
+    def expr(self, item: Item | None) -> Any:
         attr = self._get_attr(item)
         if attr is None:
             return None
         else:
             return attr.cast_value
 
-    def get_type(self, item: Optional[Item]) -> Optional[str]:
+    def get_type(self, item: Item | None) -> str | None:
         attr = self._get_attr(item)
         if attr is None:
             return None
@@ -916,7 +981,7 @@ class AttributePath(Operand):
 
 
 class AttributeValue(Operand):
-    def __init__(self, value: Dict[str, Any]):
+    def __init__(self, value: dict[str, Any]):
         """Initialize the AttributePath.
 
         Parameters
@@ -928,27 +993,23 @@ class AttributeValue(Operand):
         self.type = list(value.keys())[0]
         self.value = value[self.type]
 
-    def expr(self, item: Optional[Item]) -> Any:
-        # TODO: Reuse DynamoType code
+    def expr(self, item: Item | None) -> Any:
         if self.type == "N":
-            try:
-                return int(self.value)
-            except ValueError:
-                return float(self.value)
+            return Decimal(self.value)
         elif self.type in ["SS", "NS", "BS"]:
             sub_type = self.type[0]
-            return set([AttributeValue({sub_type: v}).expr(item) for v in self.value])
+            return {AttributeValue({sub_type: v}).expr(item) for v in self.value}
         elif self.type == "L":
             return [AttributeValue(v).expr(item) for v in self.value]
         elif self.type == "M":
-            return dict(
-                [(k, AttributeValue(v).expr(item)) for k, v in self.value.items()]
-            )
+            return {k: AttributeValue(v).expr(item) for k, v in self.value.items()}
+        elif self.type == "NULL":
+            return None
         else:
             return self.value
         return self.value
 
-    def get_type(self, item: Optional[Item]) -> str:
+    def get_type(self, item: Item | None) -> str:
         return self.type
 
     def __repr__(self) -> str:
@@ -958,7 +1019,7 @@ class AttributeValue(Operand):
 class OpDefault(Op):
     OP = "NONE"
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         """If no condition is specified, always True."""
         return True
 
@@ -966,10 +1027,10 @@ class OpDefault(Op):
 class OpNot(Op):
     OP = "NOT"
 
-    def __init__(self, lhs: Union["Func", Op]):
+    def __init__(self, lhs: Func | Op):
         super().__init__(lhs, None)  # type: ignore[arg-type]
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         lhs = self.lhs.expr(item)
         return not lhs
 
@@ -980,7 +1041,7 @@ class OpNot(Op):
 class OpAnd(Op):
     OP = "AND"
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         lhs = self.lhs.expr(item)
         return lhs and self.rhs.expr(item)
 
@@ -988,7 +1049,7 @@ class OpAnd(Op):
 class OpLessThan(Op):
     OP = "<"
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         lhs = self.lhs.expr(item)
         rhs = self.rhs.expr(item)
         # In python3 None is not a valid comparator when using < or > so must be handled specially
@@ -1001,7 +1062,7 @@ class OpLessThan(Op):
 class OpGreaterThan(Op):
     OP = ">"
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         lhs = self.lhs.expr(item)
         rhs = self.rhs.expr(item)
         # In python3 None is not a valid comparator when using < or > so must be handled specially
@@ -1014,7 +1075,7 @@ class OpGreaterThan(Op):
 class OpEqual(Op):
     OP = "="
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         lhs = self.lhs.expr(item)
         rhs = self.rhs.expr(item)
         return lhs == rhs
@@ -1023,7 +1084,7 @@ class OpEqual(Op):
 class OpNotEqual(Op):
     OP = "<>"
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         lhs = self.lhs.expr(item)
         rhs = self.rhs.expr(item)
         return lhs != rhs
@@ -1032,7 +1093,7 @@ class OpNotEqual(Op):
 class OpLessThanOrEqual(Op):
     OP = "<="
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         lhs = self.lhs.expr(item)
         rhs = self.rhs.expr(item)
         # In python3 None is not a valid comparator when using < or > so must be handled specially
@@ -1045,7 +1106,7 @@ class OpLessThanOrEqual(Op):
 class OpGreaterThanOrEqual(Op):
     OP = ">="
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         lhs = self.lhs.expr(item)
         rhs = self.rhs.expr(item)
         # In python3 None is not a valid comparator when using < or > so must be handled specially
@@ -1058,7 +1119,7 @@ class OpGreaterThanOrEqual(Op):
 class OpOr(Op):
     OP = "OR"
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         lhs = self.lhs.expr(item)
         return lhs or self.rhs.expr(item)
 
@@ -1073,7 +1134,7 @@ class Func:
     def __init__(self, *arguments: Any):
         self.arguments = arguments
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         raise NotImplementedError
 
     def __repr__(self) -> str:
@@ -1087,7 +1148,7 @@ class FuncAttrExists(Func):
         self.attr = attribute
         super().__init__(attribute)
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         return self.attr.get_type(item) is not None
 
 
@@ -1103,7 +1164,7 @@ class FuncAttrType(Func):
         self.type = _type
         super().__init__(attribute, _type)
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         return self.attr.get_type(item) == self.type.expr(item)  # type: ignore[comparison-overlap]
 
 
@@ -1115,7 +1176,7 @@ class FuncBeginsWith(Func):
         self.substr = substr
         super().__init__(attribute, substr)
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         if self.attr.get_type(item) != "S":
             return False
         if self.substr.get_type(item) != "S":
@@ -1131,7 +1192,7 @@ class FuncContains(Func):
         self.operand = operand
         super().__init__(attribute, operand)
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         if self.attr.get_type(item) in ("S", "SS", "NS", "BS", "L"):
             try:
                 return self.operand.expr(item) in self.attr.expr(item)
@@ -1151,7 +1212,7 @@ class FuncSize(Func):
         self.attr = attribute
         super().__init__(attribute)
 
-    def expr(self, item: Optional[Item]) -> int:  # type: ignore[override]
+    def expr(self, item: Item | None) -> int:  # type: ignore[override]
         if self.attr.get_type(item) is None:
             raise ValueError(f"Invalid attribute name {self.attr}")
 
@@ -1164,29 +1225,19 @@ class FuncBetween(Func):
     FUNC = "BETWEEN"
 
     def __init__(self, attribute: Operand, start: Operand, end: Operand):
+        for bound in (start, end):
+            if bound.get_type(None) == "NULL":
+                raise IncorrectOperandType(FuncBetween.FUNC, "NULL")
         self.attr = attribute
         self.start = start
         self.end = end
         super().__init__(attribute, start, end)
 
-    def expr(self, item: Optional[Item]) -> bool:
-        # In python3 None is not a valid comparator when using < or > so must be handled specially
+    def expr(self, item: Item | None) -> bool:
         start = self.start.expr(item)
         attr = self.attr.expr(item)
         end = self.end.expr(item)
-        # Need to verify whether start has a valid value
-        # Can't just check  'if start', because start could be 0, which is a valid integer
-        start_has_value = start is not None and (isinstance(start, int) or start)
-        end_has_value = end is not None and (isinstance(end, int) or end)
-        if start_has_value and attr and end_has_value:
-            return start <= attr <= end
-        elif start is None and attr is None:
-            # None is between None and None as well as None is between None and any number
-            return True
-        elif start is None and attr and end:
-            return attr <= end
-        else:
-            return False
+        return attr is not None and start <= attr <= end
 
 
 class FuncIn(Func):
@@ -1197,7 +1248,7 @@ class FuncIn(Func):
         self.possible_values = possible_values
         super().__init__(attribute, *possible_values)
 
-    def expr(self, item: Optional[Item]) -> bool:
+    def expr(self, item: Item | None) -> bool:
         for possible_value in self.possible_values:
             if self.attr.expr(item) == possible_value.expr(item):
                 return True
@@ -1214,7 +1265,7 @@ COMPARATOR_CLASS = {
     "<>": OpNotEqual,
 }
 
-FUNC_CLASS: Dict[str, Any] = {
+FUNC_CLASS: dict[str, Any] = {
     "attribute_exists": FuncAttrExists,
     "attribute_not_exists": FuncAttrNotExists,
     "attribute_type": FuncAttrType,

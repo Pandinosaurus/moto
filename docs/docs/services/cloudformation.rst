@@ -25,18 +25,19 @@ cloudformation
 - [ ] create_generated_template
 - [X] create_stack
   
-        The functionality behind EnableTerminationProtection is not yet implemented.
-        
+The functionality behind EnableTerminationProtection is not yet implemented.
+
 
 - [X] create_stack_instances
   
-        The following parameters are not yet implemented: DeploymentTargets.AccountFilterType, DeploymentTargets.AccountsUrl, OperationPreferences, CallAs
-        
+The following parameters are not yet implemented: DeploymentTargets.AccountFilterType, DeploymentTargets.AccountsUrl, OperationPreferences, CallAs
 
+
+- [ ] create_stack_refactor
 - [X] create_stack_set
   
-        The following parameters are not yet implemented: StackId, AdministrationRoleARN, AutoDeployment, ExecutionRoleName, CallAs, ClientRequestToken, ManagedExecution
-        
+The following parameters are not yet implemented: StackId, AdministrationRoleARN, AutoDeployment, ExecutionRoleName, CallAs, ClientRequestToken, ManagedExecution
+
 
 - [ ] deactivate_organizations_access
 - [ ] deactivate_type
@@ -45,14 +46,15 @@ cloudformation
 - [X] delete_stack
 - [X] delete_stack_instances
   
-        The following parameters are not  yet implemented: DeploymentTargets, OperationPreferences, RetainStacks, OperationId, CallAs
-        
+The following parameters are not  yet implemented: DeploymentTargets, OperationPreferences, RetainStacks, OperationId, CallAs
+
 
 - [X] delete_stack_set
 - [ ] deregister_type
 - [ ] describe_account_limits
 - [X] describe_change_set
 - [ ] describe_change_set_hooks
+- [ ] describe_events
 - [ ] describe_generated_template
 - [ ] describe_organizations_access
 - [ ] describe_publisher
@@ -60,6 +62,7 @@ cloudformation
 - [ ] describe_stack_drift_detection_status
 - [X] describe_stack_events
 - [X] describe_stack_instance
+- [ ] describe_stack_refactor
 - [X] describe_stack_resource
 - [ ] describe_stack_resource_drifts
 - [X] describe_stack_resources
@@ -73,7 +76,9 @@ cloudformation
 - [ ] detect_stack_set_drift
 - [ ] estimate_template_cost
 - [X] execute_change_set
+- [ ] execute_stack_refactor
 - [ ] get_generated_template
+- [ ] get_hook_result
 - [X] get_stack_policy
 - [X] get_template
 - [ ] get_template_summary
@@ -81,6 +86,7 @@ cloudformation
 - [X] list_change_sets
 - [X] list_exports
 - [ ] list_generated_templates
+- [ ] list_hook_results
 - [ ] list_imports
 - [ ] list_resource_scan_related_resources
 - [ ] list_resource_scan_resources
@@ -88,10 +94,12 @@ cloudformation
 - [ ] list_stack_instance_resource_drifts
 - [X] list_stack_instances
   
-        Pagination is not yet implemented.
-        The parameters StackInstanceAccount/StackInstanceRegion are not yet implemented.
-        
+Pagination is not yet implemented.
+The parameters StackInstanceAccount/StackInstanceRegion are not yet implemented.
 
+
+- [ ] list_stack_refactor_actions
+- [ ] list_stack_refactors
 - [X] list_stack_resources
 - [ ] list_stack_set_auto_deployment_targets
 - [X] list_stack_set_operation_results
@@ -108,8 +116,8 @@ cloudformation
 - [ ] rollback_stack
 - [X] set_stack_policy
   
-        Note that Moto does no validation/parsing/enforcement of this policy - we simply persist it.
-        
+Note that Moto does no validation/parsing/enforcement of this policy - we simply persist it.
+
 
 - [ ] set_type_configuration
 - [ ] set_type_default_version
@@ -121,8 +129,8 @@ cloudformation
 - [X] update_stack
 - [X] update_stack_instances
   
-        Calling this will update the parameters, but the actual resources are not updated
-        
+Calling this will update the parameters, but the actual resources are not updated
+
 
 - [X] update_stack_set
 - [ ] update_termination_protection

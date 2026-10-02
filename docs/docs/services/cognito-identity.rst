@@ -16,7 +16,7 @@ cognito-identity
 
 - [X] create_identity_pool
 - [ ] delete_identities
-- [ ] delete_identity_pool
+- [X] delete_identity_pool
 - [ ] describe_identity
 - [X] describe_identity_pool
 - [X] get_credentials_for_identity
@@ -27,13 +27,13 @@ cognito-identity
 - [ ] get_principal_tag_attribute_map
 - [X] list_identities
   
-        The MaxResults-parameter has not yet been implemented
-        
+The MaxResults-parameter has not yet been implemented
+
 
 - [X] list_identity_pools
   
-        The MaxResults-parameter has not yet been implemented
-        
+The MaxResults-parameter has not yet been implemented
+
 
 - [ ] list_tags_for_resource
 - [ ] lookup_developer_identity
@@ -46,7 +46,7 @@ cognito-identity
 - [ ] untag_resource
 - [X] update_identity_pool
   
-        The AllowClassic-parameter has not yet been implemented
-        
+The AllowClassic-parameter has not yet been implemented
+
 
 

@@ -4,17 +4,15 @@ import itertools
 import os
 import re
 import unittest
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from threading import Lock
 from types import FunctionType
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
-    ContextManager,
-    Dict,
-    Optional,
-    Set,
     TypeVar,
+    cast,
 )
 from unittest.mock import patch
 
@@ -48,17 +46,17 @@ DEFAULT_ACCOUNT_ID = "123456789012"
 T = TypeVar("T")
 
 
-class MockAWS(ContextManager["MockAWS"]):
+class MockAWS(AbstractContextManager["MockAWS"]):
     _nested_count = 0
     _mocks_active = False
     _mock_init_lock = Lock()
 
-    def __init__(self, config: Optional[DefaultConfig] = None) -> None:
+    def __init__(self, config: DefaultConfig | None = None) -> None:
         self._fake_creds = {
             "AWS_ACCESS_KEY_ID": "FOOBARKEY",
             "AWS_SECRET_ACCESS_KEY": "FOOBARSECRET",
         }
-        self._orig_creds: Dict[str, Optional[str]] = {}
+        self._orig_creds: dict[str, str | None] = {}
         self._default_session_mock = patch("boto3.DEFAULT_SESSION", None)
         current_user_config = default_user_config.copy()
         current_user_config.update(config or {})
@@ -68,7 +66,7 @@ class MockAWS(ContextManager["MockAWS"]):
         self, func: "Callable[P, T]", reset: bool = True, remove_data: bool = True
     ) -> "Callable[P, T]":
         if inspect.isclass(func):
-            return self._decorate_class(func)
+            return cast("Callable[P, T]", self._decorate_class(func))
         return self._decorate_callable(func, reset, remove_data)
 
     def __enter__(self) -> "MockAWS":
@@ -128,12 +126,9 @@ class MockAWS(ContextManager["MockAWS"]):
         wrapper.__wrapped__ = func  # type: ignore[attr-defined]
         return wrapper
 
-    def _decorate_class(self, klass: "Callable[P, T]") -> "Callable[P, T]":
-        assert inspect.isclass(klass)  # Keep mypy happy
+    def _decorate_class(self, klass: type[T]) -> type[T]:
         direct_methods = get_direct_methods_of(klass)
-        defined_classes = set(
-            x for x, y in klass.__dict__.items() if inspect.isclass(y)
-        )
+        defined_classes = {x for x, y in klass.__dict__.items() if inspect.isclass(y)}
 
         # Get a list of all userdefined superclasses
         superclasses = [
@@ -155,7 +150,7 @@ class MockAWS(ContextManager["MockAWS"]):
                 continue
 
             attr_value = getattr(klass, attr)
-            if not hasattr(attr_value, "__call__"):
+            if not callable(attr_value):
                 continue
             if not hasattr(attr_value, "__name__"):
                 continue
@@ -245,12 +240,12 @@ class MockAWS(ContextManager["MockAWS"]):
         responses_mock.stop()
 
 
-def get_direct_methods_of(klass: object) -> Set[str]:
-    return set(
+def get_direct_methods_of(klass: object) -> set[str]:
+    return {
         x
         for x, y in klass.__dict__.items()
         if isinstance(y, (FunctionType, classmethod, staticmethod))
-    )
+    }
 
 
 RESPONSES_METHODS = [
@@ -305,7 +300,7 @@ def patch_client(client: botocore.client.BaseClient) -> None:
             #  - in 99% of the cases there are no duplicate event handlers, so it doesn't matter if the check fails
             pass
 
-        client.meta.events.register("before-send", botocore_stubber)
+        client.meta.events.register("before-send", botocore_stubber)  # type: ignore[arg-type]
     else:
         raise Exception(f"Argument {client} should be of type boto3.client")
 
@@ -322,7 +317,7 @@ def patch_resource(resource: Any) -> None:
         raise Exception(f"Argument {resource} should be of type boto3.resource")
 
 
-def override_responses_real_send(user_mock: Optional[responses.RequestsMock]) -> None:
+def override_responses_real_send(user_mock: responses.RequestsMock | None) -> None:
     """
     Moto creates it's own Responses-object responsible for intercepting AWS requests
     If a custom Responses-object is created by the user, Moto will hijack any of the pass-thru's set
@@ -389,7 +384,7 @@ class ServerModeMockAWS(MockAWS):
         self._client_patcher.start()
         self._resource_patcher.start()
 
-    def _get_region(self, *args: Any, **kwargs: Any) -> Optional[str]:
+    def _get_region(self, *args: Any, **kwargs: Any) -> str | None:
         if "region_name" in kwargs:
             return kwargs["region_name"]
         if type(args) is tuple and len(args) == 2:

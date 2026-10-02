@@ -1,12 +1,15 @@
 import boto3
+import pytest
 
 from moto import mock_aws
 from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
 
 
 @mock_aws
-def test_create_alarm():
-    region = "eu-west-1"
+@pytest.mark.parametrize(
+    "region,partition", [("eu-west-1", "aws"), ("cn-north-1", "aws-cn")]
+)
+def test_create_alarm(region, partition):
     cloudwatch = boto3.client("cloudwatch", region)
 
     name = "tester"
@@ -44,7 +47,10 @@ def test_create_alarm():
     assert alarm["OKActions"] == ["arn:ok"]
     assert alarm["InsufficientDataActions"] == ["arn:insufficient"]
     assert alarm["Unit"] == "Seconds"
-    assert alarm["AlarmArn"] == f"arn:aws:cloudwatch:{region}:{ACCOUNT_ID}:alarm:{name}"
+    assert (
+        alarm["AlarmArn"]
+        == f"arn:{partition}:cloudwatch:{region}:{ACCOUNT_ID}:alarm:{name}"
+    )
     # default value should be True
     assert alarm["ActionsEnabled"] is True
 
@@ -90,6 +96,42 @@ def test_delete_alarms_without_error():
 
     # when/then
     cloudwatch.delete_alarms(AlarmNames=["not-exists"])
+
+
+@mock_aws
+def test_enable_disable_alarm_actions():
+    cloudwatch = boto3.client("cloudwatch", region_name="eu-central-1")
+
+    name = "tester"
+    cloudwatch.put_metric_alarm(
+        AlarmActions=["arn:alarm"],
+        AlarmDescription="A test",
+        AlarmName=name,
+        ComparisonOperator="GreaterThanOrEqualToThreshold",
+        EvaluationPeriods=5,
+        Namespace=f"{name}_namespace",
+        MetricName=f"{name}_metric",
+        Period=60,
+        Statistic="Average",
+        Threshold=2,
+        ActionsEnabled=True,
+    )
+
+    cloudwatch.disable_alarm_actions(AlarmNames=[name])
+    alarm = cloudwatch.describe_alarms()["MetricAlarms"][0]
+    assert alarm["ActionsEnabled"] is False
+
+    cloudwatch.enable_alarm_actions(AlarmNames=[name])
+    alarm = cloudwatch.describe_alarms()["MetricAlarms"][0]
+    assert alarm["ActionsEnabled"] is True
+
+
+@mock_aws
+def test_enable_disable_alarm_actions_without_error():
+    cloudwatch = boto3.client("cloudwatch", region_name="eu-west-1")
+
+    cloudwatch.disable_alarm_actions(AlarmNames=["not-exists"])
+    cloudwatch.enable_alarm_actions(AlarmNames=["not-exists"])
 
 
 @mock_aws

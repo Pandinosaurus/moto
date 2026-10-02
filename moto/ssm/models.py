@@ -1,17 +1,21 @@
+from __future__ import annotations
+
 import datetime
 import hashlib
 import json
+import os
 import re
-import time
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, DefaultDict, Dict, Iterator, List, Optional, Tuple
+from typing import Any
+from uuid import uuid4
 
 import yaml
 
 from moto.core.base_backend import BackendDict, BaseBackend
 from moto.core.common_models import BaseModel, CloudFormationModel
-from moto.core.exceptions import RESTError
+from moto.core.resource_tagging import TaggableResourcesMixin, TaggedResource
 from moto.core.utils import utcnow
 from moto.ec2 import ec2_backends
 from moto.moto_api._internal import mock_random as random
@@ -21,8 +25,11 @@ from moto.utilities.utils import load_resource
 
 from .exceptions import (
     AccessDeniedException,
+    AlreadyExistsException,
+    BaselineDoesNotExistException,
     DocumentAlreadyExists,
     DocumentPermissionLimit,
+    DoesNotExistException,
     DuplicateDocumentContent,
     DuplicateDocumentVersionName,
     InvalidDocument,
@@ -42,10 +49,11 @@ from .exceptions import (
     ParameterVersionNotFound,
     ValidationException,
 )
+from .exceptions import SSMException as RESTError
 from .utils import convert_to_params, parameter_arn
 
 
-class ParameterDict(DefaultDict[str, List["Parameter"]]):
+class ParameterDict(defaultdict[str, list["Parameter"]]):
     def __init__(self, account_id: str, region_name: str):
         # each value is a list of all the versions for a parameter
         # to get the current value, grab the last item of the list
@@ -65,23 +73,23 @@ class ParameterDict(DefaultDict[str, List["Parameter"]]):
                 self.latest_amis_loaded = True
         if key.startswith("/aws/service/global-infrastructure/regions"):
             if not self.latest_region_defaults_loaded:
-                self._load_tree_parameters(path="resources/regions.json")
+                self._load_tree_parameters(path="regions.json")
                 self.latest_region_defaults_loaded = True
         if key.startswith("/aws/service/global-infrastructure/services"):
             if not self.latest_service_defaults_loaded:
-                self._load_tree_parameters(path="resources/services.json")
+                self._load_tree_parameters(path="services.json")
                 self.latest_service_defaults_loaded = True
         if key.startswith("/aws/service/ecs/optimized-ami"):
             if not self.latest_ecs_amis_loaded:
                 self._load_tree_parameters(
-                    f"resources/ecs/optimized_amis/{self.region_name}.json"
+                    f"ecs/optimized_amis/{self.region_name}.json"
                 )
                 self.latest_ecs_amis_loaded = True
 
     def _load_latest_amis(self) -> None:
         try:
             latest_amis_linux = load_resource(
-                __name__, f"resources/ami-amazon-linux-latest/{self.region_name}.json"
+                f"ssm/resources/ami-amazon-linux-latest/{self.region_name}.json"
             )
         except FileNotFoundError:
             latest_amis_linux = []
@@ -104,12 +112,14 @@ class ParameterDict(DefaultDict[str, List["Parameter"]]):
 
     def _load_tree_parameters(self, path: str) -> None:
         try:
-            params = convert_to_params(load_resource(__name__, path))
+            params = convert_to_params(
+                load_resource(os.path.join("ssm", "resources", path))
+            )
         except FileNotFoundError:
             params = []
 
         for param in params:
-            last_modified_date = time.time()
+            last_modified_date = utcnow()
             name = param["Name"]
             value = param["Value"]
             # Following were lost in translation/conversion - using sensible defaults
@@ -130,7 +140,7 @@ class ParameterDict(DefaultDict[str, List["Parameter"]]):
                 )
             )
 
-    def _get_secretsmanager_parameter(self, secret_name: str) -> List["Parameter"]:
+    def _get_secretsmanager_parameter(self, secret_name: str) -> list[Parameter]:
         secrets_backend = secretsmanager_backends[self.account_id][self.region_name]
         secret = secrets_backend.describe_secret(secret_name).to_dict()
         version_id_to_stage = secret["VersionIdsToStages"]
@@ -164,11 +174,11 @@ class ParameterDict(DefaultDict[str, List["Parameter"]]):
             for val in values
         ]
 
-    def __getitem__(self, item: str) -> List["Parameter"]:
+    def __getitem__(self, item: str) -> list[Parameter]:
         if item.startswith("/aws/reference/secretsmanager/"):
             return self._get_secretsmanager_parameter("/".join(item.split("/")[4:]))
         self._check_loading_status(item)
-        return super().__getitem__(item)
+        return super().__getitem__(self.normalize_name(item))
 
     def __contains__(self, k: str) -> bool:  # type: ignore[override]
         if k and k.startswith("/aws/reference/secretsmanager/"):
@@ -180,7 +190,7 @@ class ParameterDict(DefaultDict[str, List["Parameter"]]):
                     f"An error occurred (ParameterNotFound) when referencing Secrets Manager: Secret {k} not found."
                 )
         self._check_loading_status(k)
-        return super().__contains__(k)
+        return super().__contains__(self.normalize_name(k))
 
     def get_keys_beginning_with(self, path: str, recursive: bool) -> Iterator[str]:
         self._check_loading_status(path)
@@ -191,9 +201,20 @@ class ParameterDict(DefaultDict[str, List["Parameter"]]):
                 continue
             yield param_name
 
+    @staticmethod
+    def normalize_name(name: str) -> str:
+        if not name:
+            return name
+
+        stripped = name.removeprefix("/")
+        if "/" in stripped:
+            return name
+        return stripped
+
 
 PARAMETER_VERSION_LIMIT = 100
 PARAMETER_HISTORY_MAX_RESULTS = 50
+PARAMETER_BY_PATH_MAX_RESULTS = 10
 
 
 class Parameter(CloudFormationModel):
@@ -203,17 +224,16 @@ class Parameter(CloudFormationModel):
         name: str,
         value: str,
         parameter_type: str,
-        description: Optional[str],
-        allowed_pattern: Optional[str],
-        keyid: Optional[str],
-        last_modified_date: float,
+        description: str | None,
+        allowed_pattern: str | None,
+        keyid: str | None,
+        last_modified_date: datetime.datetime,
         version: int,
         data_type: str,
-        tags: Optional[List[Dict[str, str]]] = None,
-        labels: Optional[List[str]] = None,
-        source_result: Optional[str] = None,
-        tier: Optional[str] = None,
-        policies: Optional[str] = None,
+        labels: list[str] | None = None,
+        source_result: str | None = None,
+        tier: str | None = None,
+        policies: str | None = None,
     ):
         self.account_id = account_id
         self.name = name
@@ -224,7 +244,6 @@ class Parameter(CloudFormationModel):
         self.last_modified_date = last_modified_date
         self.version = version
         self.data_type = data_type
-        self.tags = tags or []
         self.labels = labels or []
         self.source_result = source_result
         self.tier = tier
@@ -241,7 +260,7 @@ class Parameter(CloudFormationModel):
     def encrypt(self, value: str) -> str:
         return f"kms:{self.keyid}:" + value
 
-    def decrypt(self, value: str) -> Optional[str]:
+    def decrypt(self, value: str) -> str | None:
         if self.parameter_type != "SecureString":
             return value
 
@@ -251,14 +270,14 @@ class Parameter(CloudFormationModel):
         return None
 
     def response_object(
-        self, decrypt: bool = False, region: Optional[str] = None
-    ) -> Dict[str, Any]:
-        r: Dict[str, Any] = {
+        self, decrypt: bool = False, region: str | None = None
+    ) -> dict[str, Any]:
+        r: dict[str, Any] = {
             "Name": self.name,
             "Type": self.parameter_type,
             "Value": self.decrypt(self.value) if decrypt else self.value,
             "Version": self.version,
-            "LastModifiedDate": round(self.last_modified_date, 3),
+            "LastModifiedDate": self.last_modified_date,
             "DataType": self.data_type,
             "Tier": self.tier,
         }
@@ -281,9 +300,9 @@ class Parameter(CloudFormationModel):
 
     def describe_response_object(
         self, decrypt: bool = False, include_labels: bool = False
-    ) -> Dict[str, Any]:
-        r: Dict[str, Any] = self.response_object(decrypt)
-        r["LastModifiedDate"] = round(self.last_modified_date, 3)
+    ) -> dict[str, Any]:
+        r: dict[str, Any] = self.response_object(decrypt)
+        r["LastModifiedDate"] = self.last_modified_date
         r["LastModifiedUser"] = "N/A"
 
         if self.description:
@@ -317,7 +336,7 @@ class Parameter(CloudFormationModel):
         account_id: str,
         region_name: str,
         **kwargs: Any,
-    ) -> "Parameter":
+    ) -> Parameter:
         ssm_backend = ssm_backends[account_id][region_name]
         properties = cloudformation_json["Properties"]
 
@@ -344,7 +363,7 @@ class Parameter(CloudFormationModel):
         cloudformation_json: Any,
         account_id: str,
         region_name: str,
-    ) -> "Parameter":
+    ) -> Parameter:
         cls.delete_from_cloudformation_json(
             original_resource.name, cloudformation_json, account_id, region_name
         )
@@ -360,10 +379,13 @@ class Parameter(CloudFormationModel):
         account_id: str,
         region_name: str,
     ) -> None:
-        ssm_backend = ssm_backends[account_id][region_name]
-        properties = cloudformation_json["Properties"]
+        resource = resource_name
 
-        ssm_backend.delete_parameter(properties.get("Name"))
+        ssm_backend = ssm_backends[account_id][region_name]
+        if not resource:
+            properties = cloudformation_json["Properties"]
+            resource = properties.get("Name")
+        ssm_backend.delete_parameter(resource)
 
     @property
     def physical_resource_id(self) -> str:
@@ -374,8 +396,8 @@ MAX_TIMEOUT_SECONDS = 3600
 
 
 def generate_ssm_doc_param_list(
-    parameters: Dict[str, Any],
-) -> Optional[List[Dict[str, Any]]]:
+    parameters: dict[str, Any],
+) -> list[dict[str, Any]] | None:
     if not parameters:
         return None
     param_list = []
@@ -411,22 +433,22 @@ class AccountPermission:
 
 
 class Documents(BaseModel):
-    def __init__(self, ssm_document: "Document"):
+    def __init__(self, ssm_document: Document):
         version = ssm_document.document_version
         self.versions = {version: ssm_document}
         self.default_version = version
         self.latest_version = version
-        self.permissions: Dict[
+        self.permissions: dict[
             str, AccountPermission
         ] = {}  # {AccountID: AccountPermission }
 
-    def get_default_version(self) -> "Document":
+    def get_default_version(self) -> Document:
         return self.versions[self.default_version]
 
-    def get_latest_version(self) -> "Document":
+    def get_latest_version(self) -> Document:
         return self.versions[self.latest_version]
 
-    def find_by_version_name(self, version_name: str) -> Optional["Document"]:
+    def find_by_version_name(self, version_name: str) -> Document | None:
         return next(
             (
                 document
@@ -436,12 +458,12 @@ class Documents(BaseModel):
             None,
         )
 
-    def find_by_version(self, version: str) -> Optional["Document"]:
+    def find_by_version(self, version: str) -> Document | None:
         return self.versions.get(version)
 
     def find_by_version_and_version_name(
         self, version: str, version_name: str
-    ) -> Optional["Document"]:
+    ) -> Document | None:
         return next(
             (
                 document
@@ -453,12 +475,12 @@ class Documents(BaseModel):
 
     def find(
         self,
-        document_version: Optional[str] = None,
-        version_name: Optional[str] = None,
+        document_version: str | None = None,
+        version_name: str | None = None,
         strict: bool = True,
-    ) -> "Document":
+    ) -> Document:
         if document_version == "$LATEST":
-            ssm_document: Optional["Document"] = self.get_latest_version()
+            ssm_document: Document | None = self.get_latest_version()
         elif version_name and document_version:
             ssm_document = self.find_by_version_and_version_name(
                 document_version, version_name
@@ -476,16 +498,16 @@ class Documents(BaseModel):
         return ssm_document  # type: ignore
 
     def exists(
-        self, document_version: Optional[str] = None, version_name: Optional[str] = None
+        self, document_version: str | None = None, version_name: str | None = None
     ) -> bool:
         return self.find(document_version, version_name, strict=False) is not None
 
-    def add_new_version(self, new_document_version: "Document") -> None:
+    def add_new_version(self, new_document_version: Document) -> None:
         version = new_document_version.document_version
         self.latest_version = version
         self.versions[version] = new_document_version
 
-    def update_default_version(self, version: str) -> "Document":
+    def update_default_version(self, version: str) -> Document:
         ssm_document = self.find_by_version(version)
         if not ssm_document:
             raise InvalidDocument("The specified document does not exist.")
@@ -504,17 +526,17 @@ class Documents(BaseModel):
 
     def describe(
         self,
-        document_version: Optional[str] = None,
-        version_name: Optional[str] = None,
-        tags: Optional[List[Dict[str, str]]] = None,
-    ) -> Dict[str, Any]:
+        document_version: str | None = None,
+        version_name: str | None = None,
+        tags: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
         document = self.find(document_version, version_name)
-        base: Dict[str, Any] = {
+        base: dict[str, Any] = {
             "Hash": document.hash,
             "HashType": "Sha256",
             "Name": document.name,
             "Owner": document.owner,
-            "CreatedDate": document.created_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "CreatedDate": document.created_date,
             "Status": document.status,
             "DocumentVersion": document.document_version,
             "Description": document.description,
@@ -536,7 +558,7 @@ class Documents(BaseModel):
         return base
 
     def modify_permissions(
-        self, accounts_to_add: List[str], accounts_to_remove: List[str], version: str
+        self, accounts_to_add: list[str], accounts_to_remove: list[str], version: str
     ) -> None:
         version = version or "$DEFAULT"
         if accounts_to_add:
@@ -546,9 +568,7 @@ class Documents(BaseModel):
                 self.permissions.pop("all", None)
 
             new_permissions = {
-                account_id: AccountPermission(
-                    account_id, version, datetime.datetime.now()
-                )
+                account_id: AccountPermission(account_id, version, utcnow())
                 for account_id in accounts_to_add
             }
             self.permissions.update(**new_permissions)
@@ -560,7 +580,7 @@ class Documents(BaseModel):
                 for account_id in accounts_to_remove:
                     self.permissions.pop(account_id, None)
 
-    def describe_permissions(self) -> Dict[str, Any]:
+    def describe_permissions(self) -> dict[str, Any]:
         permissions_ordered_by_date = sorted(
             self.permissions.values(), key=lambda p: p.created_at
         )
@@ -577,7 +597,7 @@ class Documents(BaseModel):
         return len(self.permissions) > 0
 
 
-class Document(BaseModel):
+class Document(CloudFormationModel):
     def __init__(
         self,
         account_id: str,
@@ -586,8 +606,8 @@ class Document(BaseModel):
         content: str,
         document_type: str,
         document_format: str,
-        requires: List[Dict[str, str]],
-        attachments: List[Dict[str, Any]],
+        requires: list[dict[str, str]],
+        attachments: list[dict[str, Any]],
         target_type: str,
         document_version: str = "1",
     ):
@@ -605,7 +625,10 @@ class Document(BaseModel):
         self.owner = account_id
         self.created_date = utcnow()
 
-        if document_format == "JSON":
+        if isinstance(content, dict):
+            # Terraform may send this content as an already-parsed dict
+            content_json = content
+        elif document_format == "JSON":
             try:
                 content_json = json.loads(content)
             except json.decoder.JSONDecodeError:
@@ -647,10 +670,8 @@ class Document(BaseModel):
     def hash(self) -> str:
         return hashlib.sha256(self.content.encode("utf-8")).hexdigest()
 
-    def list_describe(
-        self, tags: Optional[List[Dict[str, str]]] = None
-    ) -> Dict[str, Any]:
-        base: Dict[str, Any] = {
+    def list_describe(self, tags: list[dict[str, str]] | None = None) -> dict[str, Any]:
+        base: dict[str, Any] = {
             "Name": self.name,
             "Owner": self.owner,
             "DocumentVersion": self.document_version,
@@ -671,24 +692,93 @@ class Document(BaseModel):
 
         return base
 
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::SSM::Document"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> Document:
+        ssm_backend: SimpleSystemManagerBackend = ssm_backends[account_id][region_name]
+        properties = cloudformation_json["Properties"]
+
+        documents = ssm_backend.create_document(
+            content=properties.get("Content"),
+            requires=properties.get("Requires"),
+            attachments=properties.get("Attachments"),
+            name=properties.get("Name") or str(uuid4()),
+            version_name=properties.get("VersionName"),
+            document_type=properties.get("DocumentType"),
+            document_format=properties.get("DocumentFormat"),
+            target_type=properties.get("TargetType"),
+            tags=properties.get("Tags"),
+        )
+        return documents.get_default_version()
+
+    @classmethod
+    def update_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        original_resource: Any,
+        new_resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+    ) -> Document:
+        cls.delete_from_cloudformation_json(
+            original_resource.name, cloudformation_json, account_id, region_name
+        )
+        return cls.create_from_cloudformation_json(
+            new_resource_name, cloudformation_json, account_id, region_name
+        )
+
+    @classmethod
+    def delete_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+    ) -> None:
+        resource = resource_name
+        ssm_backend: SimpleSystemManagerBackend = ssm_backends[account_id][region_name]
+        if not resource:
+            properties = cloudformation_json["Properties"]
+            resource = properties.get("Name")
+        ssm_backend.delete_document(
+            name=resource,
+            document_version="",
+            version_name=cloudformation_json.get("VersionName") or "",
+            force=True,
+        )
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.name
+
 
 class Command(BaseModel):
     def __init__(
         self,
         account_id: str,
         comment: str = "",
-        document_name: Optional[str] = "",
-        timeout_seconds: Optional[int] = MAX_TIMEOUT_SECONDS,
-        instance_ids: Optional[List[str]] = None,
+        document_name: str | None = "",
+        timeout_seconds: int | None = MAX_TIMEOUT_SECONDS,
+        instance_ids: list[str] | None = None,
         max_concurrency: str = "",
         max_errors: str = "",
-        notification_config: Optional[Dict[str, Any]] = None,
+        notification_config: dict[str, Any] | None = None,
         output_s3_bucket_name: str = "",
         output_s3_key_prefix: str = "",
         output_s3_region: str = "",
-        parameters: Optional[Dict[str, List[str]]] = None,
+        parameters: dict[str, list[str]] | None = None,
         service_role_arn: str = "",
-        targets: Optional[List[Dict[str, Any]]] = None,
+        targets: list[dict[str, Any]] | None = None,
         backend_region: str = "us-east-1",
     ):
         if instance_ids is None:
@@ -706,12 +796,10 @@ class Command(BaseModel):
         self.account_id = account_id
 
         self.timeout_seconds = timeout_seconds or MAX_TIMEOUT_SECONDS
-        self.requested_date_time = datetime.datetime.now()
-        self.requested_date_time_iso = self.requested_date_time.isoformat()
-        expires_after = self.requested_date_time + datetime.timedelta(
+        self.requested_date_time = utcnow()
+        self.expires_after = self.requested_date_time + datetime.timedelta(
             0, self.timeout_seconds
         )
-        self.expires_after = expires_after.isoformat()
 
         self.comment = comment
         self.document_name = document_name
@@ -751,7 +839,7 @@ class Command(BaseModel):
                 self.invocation_response(instance_id, "aws:runShellScript")
             )
 
-    def _get_instance_ids_from_targets(self) -> List[str]:
+    def _get_instance_ids_from_targets(self) -> list[str]:
         target_instance_ids = []
         ec2_backend = ec2_backends[self.account_id][self.backend_region]
         ec2_filters = {target["Key"]: target["Values"] for target in self.targets}
@@ -761,7 +849,7 @@ class Command(BaseModel):
                 target_instance_ids.append(instance.id)
         return target_instance_ids
 
-    def response_object(self) -> Dict[str, Any]:
+    def response_object(self) -> dict[str, Any]:
         return {
             "CommandId": self.command_id,
             "Comment": self.comment,
@@ -778,7 +866,7 @@ class Command(BaseModel):
             "OutputS3BucketName": self.output_s3_bucket_name,
             "OutputS3KeyPrefix": self.output_s3_key_prefix,
             "Parameters": self.parameters,
-            "RequestedDateTime": self.requested_date_time_iso,
+            "RequestedDateTime": self.requested_date_time,
             "ServiceRole": self.service_role_arn,
             "Status": self.status,
             "StatusDetails": self.status_details,
@@ -787,7 +875,7 @@ class Command(BaseModel):
             "TimeoutSeconds": self.timeout_seconds,
         }
 
-    def invocation_response(self, instance_id: str, plugin_name: str) -> Dict[str, Any]:
+    def invocation_response(self, instance_id: str, plugin_name: str) -> dict[str, Any]:
         # Calculate elapsed time from requested time and now. Use a hardcoded
         # elapsed time since there is no easy way to convert a timedelta to
         # an ISO 8601 duration string.
@@ -802,7 +890,7 @@ class Command(BaseModel):
             "DocumentName": self.document_name,
             "PluginName": plugin_name,
             "ResponseCode": 0,
-            "ExecutionStartDateTime": self.requested_date_time_iso,
+            "ExecutionStartDateTime": self.requested_date_time.isoformat(),
             "ExecutionElapsedTime": elapsed_time_iso,
             "ExecutionEndDateTime": end_time.isoformat(),
             "Status": "Success",
@@ -813,8 +901,8 @@ class Command(BaseModel):
         }
 
     def get_invocation(
-        self, instance_id: str, plugin_name: Optional[str]
-    ) -> Dict[str, Any]:
+        self, instance_id: str, plugin_name: str | None
+    ) -> dict[str, Any]:
         invocation = next(
             (
                 invocation
@@ -848,7 +936,7 @@ def _validate_document_format(document_format: str) -> None:
 def _validate_document_info(
     content: str,
     name: str,
-    document_type: Optional[str],
+    document_type: str | None,
     document_format: str,
     strict: bool = True,
 ) -> None:
@@ -883,7 +971,7 @@ def _validate_document_info(
 
 
 def _document_filter_equal_comparator(
-    keyed_value: str, _filter: Dict[str, Any]
+    keyed_value: str, _filter: dict[str, Any]
 ) -> bool:
     for v in _filter["Values"]:
         if keyed_value == v:
@@ -892,7 +980,7 @@ def _document_filter_equal_comparator(
 
 
 def _document_filter_list_includes_comparator(
-    keyed_value_list: List[str], _filter: Dict[str, Any]
+    keyed_value_list: list[str], _filter: dict[str, Any]
 ) -> bool:
     for v in _filter["Values"]:
         if v in keyed_value_list:
@@ -901,7 +989,7 @@ def _document_filter_list_includes_comparator(
 
 
 def _document_filter_match(
-    account_id: str, filters: List[Dict[str, Any]], ssm_doc: Document
+    account_id: str, filters: list[dict[str, Any]], ssm_doc: Document
 ) -> bool:
     for _filter in filters:
         if _filter["Key"] == "Name" and not _document_filter_equal_comparator(
@@ -959,10 +1047,10 @@ class FakeMaintenanceWindowTarget:
         self,
         window_id: str,
         resource_type: str,
-        targets: List[Dict[str, Any]],
-        owner_information: Optional[str],
-        name: Optional[str],
-        description: Optional[str],
+        targets: list[dict[str, Any]],
+        owner_information: str | None,
+        name: str | None,
+        description: str | None,
     ):
         self.window_id = window_id
         self.window_target_id = self.generate_id()
@@ -972,7 +1060,7 @@ class FakeMaintenanceWindowTarget:
         self.description = description
         self.owner_information = owner_information
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "WindowId": self.window_id,
             "WindowTargetId": self.window_target_id,
@@ -992,20 +1080,20 @@ class FakeMaintenanceWindowTask:
     def __init__(
         self,
         window_id: str,
-        targets: Optional[List[Dict[str, Any]]],
+        targets: list[dict[str, Any]] | None,
         task_arn: str,
-        service_role_arn: Optional[str],
+        service_role_arn: str | None,
         task_type: str,
-        task_parameters: Optional[Dict[str, Any]],
-        task_invocation_parameters: Optional[Dict[str, Any]],
-        priority: Optional[int],
-        max_concurrency: Optional[str],
-        max_errors: Optional[str],
-        logging_info: Optional[Dict[str, Any]],
-        name: Optional[str],
-        description: Optional[str],
-        cutoff_behavior: Optional[str],
-        alarm_configurations: Optional[Dict[str, Any]],
+        task_parameters: dict[str, Any] | None,
+        task_invocation_parameters: dict[str, Any] | None,
+        priority: int | None,
+        max_concurrency: str | None,
+        max_errors: str | None,
+        logging_info: dict[str, Any] | None,
+        name: str | None,
+        description: str | None,
+        cutoff_behavior: str | None,
+        alarm_configurations: dict[str, Any] | None,
     ):
         self.window_task_id = FakeMaintenanceWindowTask.generate_id()
         self.window_id = window_id
@@ -1024,7 +1112,7 @@ class FakeMaintenanceWindowTask:
         self.cutoff_behavior = cutoff_behavior
         self.alarm_configurations = alarm_configurations
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "WindowId": self.window_id,
             "WindowTaskId": self.window_task_id,
@@ -1048,7 +1136,7 @@ class FakeMaintenanceWindowTask:
 
 
 def _maintenance_window_target_filter_match(
-    filters: Optional[List[Dict[str, Any]]], target: FakeMaintenanceWindowTarget
+    filters: list[dict[str, Any]] | None, target: FakeMaintenanceWindowTarget
 ) -> bool:
     if not filters and target:
         return True
@@ -1056,7 +1144,7 @@ def _maintenance_window_target_filter_match(
 
 
 def _maintenance_window_task_filter_match(
-    filters: Optional[List[Dict[str, Any]]], task: FakeMaintenanceWindowTask
+    filters: list[dict[str, Any]] | None, task: FakeMaintenanceWindowTask
 ) -> bool:
     if not filters and task:
         return True
@@ -1086,10 +1174,10 @@ class FakeMaintenanceWindow:
         self.schedule_offset = schedule_offset
         self.start_date = start_date
         self.end_date = end_date
-        self.targets: Dict[str, FakeMaintenanceWindowTarget] = {}
-        self.tasks: Dict[str, FakeMaintenanceWindowTask] = {}
+        self.targets: dict[str, FakeMaintenanceWindowTarget] = {}
+        self.tasks: dict[str, FakeMaintenanceWindowTask] = {}
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "WindowId": self.id,
             "Name": self.name,
@@ -1115,15 +1203,15 @@ class FakePatchBaseline:
         self,
         name: str,
         operating_system: str,
-        global_filters: Optional[Dict[str, Any]],
-        approval_rules: Optional[Dict[str, Any]],
-        approved_patches: Optional[List[str]],
-        approved_patches_compliance_level: Optional[str],
-        approved_patches_enable_non_security: Optional[bool],
-        rejected_patches: Optional[List[str]],
-        rejected_patches_action: Optional[str],
-        description: Optional[str],
-        sources: Optional[List[Dict[str, Any]]],
+        global_filters: dict[str, Any] | None,
+        approval_rules: dict[str, Any] | None,
+        approved_patches: list[str] | None,
+        approved_patches_compliance_level: str | None,
+        approved_patches_enable_non_security: bool | None,
+        rejected_patches: list[str] | None,
+        rejected_patches_action: str | None,
+        description: str | None,
+        sources: list[dict[str, Any]] | None,
     ):
         self.id = FakePatchBaseline.generate_id()
         self.operating_system = operating_system
@@ -1139,7 +1227,7 @@ class FakePatchBaseline:
         self.sources = sources
         self.default_baseline = False
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "BaselineId": self.id,
             "OperatingSystem": self.operating_system,
@@ -1162,7 +1250,24 @@ class FakePatchBaseline:
         return "pb-" + "".join(str(random.choice(chars)) for _ in range(17))
 
 
-class SimpleSystemManagerBackend(BaseBackend):
+class FakePatchGroup:
+    def __init__(self, name: str, region_name: str):
+        self.name = name
+        self.region_name = region_name
+        self._load_latest_baselines()
+        self.associations = self.default_associations
+
+    def _load_latest_baselines(self) -> None:
+        try:
+            latest_patch_baselines = load_resource(
+                "ssm/resources/default_baselines.json"
+            )
+        except FileNotFoundError:
+            latest_patch_baselines = {}
+        self.default_associations = latest_patch_baselines[self.region_name]
+
+
+class SimpleSystemManagerBackend(BaseBackend, TaggableResourcesMixin):
     """
     Moto supports the following default parameters out of the box:
 
@@ -1174,25 +1279,32 @@ class SimpleSystemManagerBackend(BaseBackend):
     Integration with SecretsManager is also supported.
     """
 
+    SERVICE_NAMESPACE = "ssm"
+
     def __init__(self, region_name: str, account_id: str):
         super().__init__(region_name, account_id)
         self._parameters = ParameterDict(account_id, region_name)
 
-        self._resource_tags: DefaultDict[str, DefaultDict[str, Dict[str, str]]] = (
+        self._resource_tags: defaultdict[str, defaultdict[str, dict[str, str]]] = (
             defaultdict(lambda: defaultdict(dict))
         )
-        self._commands: List[Command] = []
-        self._errors: List[str] = []
-        self._documents: Dict[str, Documents] = {}
+        self._commands: list[Command] = []
+        self._errors: list[str] = []
+        self._documents: dict[str, Documents] = {}
 
-        self.windows: Dict[str, FakeMaintenanceWindow] = dict()
-        self.baselines: Dict[str, FakePatchBaseline] = dict()
+        self.windows: dict[str, FakeMaintenanceWindow] = {}
+        self.baselines: dict[str, FakePatchBaseline] = {}
+        self.patch_groups: dict[str, FakePatchGroup] = {}
+        self.ssm_prefix = (
+            f"arn:{self.partition}:ssm:{self.region_name}:{self.account_id}:parameter"
+        )
+        self.default_parameter_tier = "Standard"
 
     def _generate_document_information(
         self, ssm_document: Document, document_format: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         content = self._get_document_content(document_format, ssm_document)
-        base: Dict[str, Any] = {
+        base: dict[str, Any] = {
             "Name": ssm_document.name,
             "DocumentVersion": ssm_document.document_version,
             "Status": ssm_document.status,
@@ -1228,7 +1340,7 @@ class SimpleSystemManagerBackend(BaseBackend):
             raise InvalidDocument("The specified document does not exist.")
         return documents
 
-    def _get_documents_tags(self, name: str) -> List[Dict[str, str]]:
+    def _get_documents_tags(self, name: str) -> list[dict[str, str]]:
         docs_tags = self._resource_tags.get("Document")
         if docs_tags:
             document_tags = docs_tags.get(name, {})
@@ -1240,15 +1352,15 @@ class SimpleSystemManagerBackend(BaseBackend):
     def create_document(
         self,
         content: str,
-        requires: List[Dict[str, str]],
-        attachments: List[Dict[str, Any]],
+        requires: list[dict[str, str]],
+        attachments: list[dict[str, Any]],
         name: str,
         version_name: str,
         document_type: str,
         document_format: str,
         target_type: str,
-        tags: List[Dict[str, str]],
-    ) -> Dict[str, Any]:
+        tags: list[dict[str, str]],
+    ) -> Documents:
         ssm_document = Document(
             account_id=self.account_id,
             name=name,
@@ -1278,7 +1390,7 @@ class SimpleSystemManagerBackend(BaseBackend):
             document_tags = {t["Key"]: t["Value"] for t in tags}
             self.add_tags_to_resource("Document", name, document_tags)
 
-        return documents.describe(tags=tags)
+        return documents
 
     def delete_document(
         self, name: str, document_version: str, version_name: str, force: bool
@@ -1336,7 +1448,7 @@ class SimpleSystemManagerBackend(BaseBackend):
 
     def get_document(
         self, name: str, document_version: str, version_name: str, document_format: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         documents = self._get_documents(name)
         ssm_document = documents.find(document_version, version_name)
 
@@ -1349,11 +1461,11 @@ class SimpleSystemManagerBackend(BaseBackend):
 
     def update_document_default_version(
         self, name: str, document_version: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         documents = self._get_documents(name)
         ssm_document = documents.update_default_version(document_version)
 
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "Name": ssm_document.name,
             "DefaultVersion": document_version,
         }
@@ -1366,13 +1478,13 @@ class SimpleSystemManagerBackend(BaseBackend):
     def update_document(
         self,
         content: str,
-        attachments: List[Dict[str, Any]],
+        attachments: list[dict[str, Any]],
         name: str,
         version_name: str,
         document_version: str,
         document_format: str,
         target_type: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         _validate_document_info(
             content=content,
             name=name,
@@ -1429,7 +1541,7 @@ class SimpleSystemManagerBackend(BaseBackend):
 
     def describe_document(
         self, name: str, document_version: str, version_name: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         documents = self._get_documents(name)
         tags = self._get_documents_tags(name)
         return documents.describe(document_version, version_name, tags=tags)
@@ -1437,17 +1549,17 @@ class SimpleSystemManagerBackend(BaseBackend):
     def list_documents(
         self,
         document_filter_list: Any,
-        filters: List[Dict[str, Any]],
+        filters: list[dict[str, Any]],
         max_results: int = 10,
         token: str = "0",
-    ) -> Tuple[List[Dict[str, Any]], str]:
+    ) -> tuple[list[dict[str, Any]], str]:
         if document_filter_list:
             raise ValidationException(
                 "DocumentFilterList is deprecated. Instead use Filters."
             )
 
         next_token = int(token or "0")
-        results: List[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
         dummy_token_tracker = 0
         # Sort to maintain next token adjacency
         for _, documents in sorted(self._documents.items()):
@@ -1473,7 +1585,7 @@ class SimpleSystemManagerBackend(BaseBackend):
         # If we've fallen out of the loop, there are no more documents. No next token.
         return results, ""
 
-    def describe_document_permission(self, name: str) -> Dict[str, Any]:
+    def describe_document_permission(self, name: str) -> dict[str, Any]:
         """
         Parameters max_results, permission_type, and next_token not yet implemented
         """
@@ -1483,8 +1595,8 @@ class SimpleSystemManagerBackend(BaseBackend):
     def modify_document_permission(
         self,
         name: str,
-        account_ids_to_add: List[str],
-        account_ids_to_remove: List[str],
+        account_ids_to_add: list[str],
+        account_ids_to_remove: list[str],
         shared_document_version: str,
         permission_type: str,
     ) -> None:
@@ -1535,24 +1647,30 @@ class SimpleSystemManagerBackend(BaseBackend):
             account_ids_to_add, account_ids_to_remove, shared_document_version
         )
 
-    def delete_parameter(self, name: str) -> Optional[Parameter]:
-        self._resource_tags.get("Parameter", {}).pop(name, None)  # type: ignore
-        return self._parameters.pop(name, None)  # type: ignore
+    def delete_parameter(self, name: str) -> None:
+        normalized_parameter_name = self._parameters.normalize_name(name)
+        result = self._parameters.pop(normalized_parameter_name, None)  # type: ignore
+        if result is None:
+            raise ParameterNotFound(f"Parameter {name} not found.")
+        self._resource_tags.get("Parameter", {}).pop(normalized_parameter_name, None)  # type: ignore
 
-    def delete_parameters(self, names: List[str]) -> List[str]:
+    def delete_parameters(self, names: list[str]) -> list[str]:
         result = []
         for name in names:
             try:
-                del self._parameters[name]
+                normalized_parameter_name = self._parameters.normalize_name(name)
+                del self._parameters[normalized_parameter_name]
                 result.append(name)
-                self._resource_tags.get("Parameter", {}).pop(name, None)  # type: ignore
+                self._resource_tags.get("Parameter", {}).pop(
+                    normalized_parameter_name, None
+                )  # type: ignore
             except KeyError:
                 pass
         return result
 
     def describe_parameters(
-        self, filters: List[Dict[str, Any]], parameter_filters: List[Dict[str, Any]]
-    ) -> List[Parameter]:
+        self, filters: list[dict[str, Any]], parameter_filters: list[dict[str, Any]]
+    ) -> list[Parameter]:
         if filters and parameter_filters:
             raise ValidationException(
                 "You can use either Filters or ParameterFilters in a single request."
@@ -1592,7 +1710,7 @@ class SimpleSystemManagerBackend(BaseBackend):
         return result
 
     def _validate_parameter_filters(
-        self, parameter_filters: Optional[List[Dict[str, Any]]], by_path: bool
+        self, parameter_filters: list[dict[str, Any]] | None, by_path: bool
     ) -> None:
         for index, filter_obj in enumerate(parameter_filters or []):
             key = filter_obj["Key"]
@@ -1653,7 +1771,6 @@ class SimpleSystemManagerBackend(BaseBackend):
         filter_keys = []
         for filter_obj in parameter_filters or []:
             key = filter_obj["Key"]
-            values = filter_obj.get("Values")
 
             if key == "Path":
                 option = filter_obj.get("Option", "OneLevel")
@@ -1670,7 +1787,9 @@ class SimpleSystemManagerBackend(BaseBackend):
                     f"The following filter key is not valid: {key}. Valid filter keys include: [Type, KeyId]."
                 )
 
-            if key in ["Name", "Type", "Path", "Tier", "Keyid"] and not values:
+            if key in ["Name", "Type", "Path", "Tier", "Keyid"] and not filter_obj.get(
+                "Values"
+            ):
                 raise InvalidFilterValue(
                     "The following filter values are missing : null for filter key Name."
                 )
@@ -1681,16 +1800,19 @@ class SimpleSystemManagerBackend(BaseBackend):
                 )
 
             if key == "Path":
+                path_values = filter_obj["Values"]
                 if option not in ["Recursive", "OneLevel"]:
                     raise InvalidFilterOption(
                         f"The following filter option is not valid: {option}. Valid options include: [Recursive, OneLevel]."
                     )
-                if any(value.lower().startswith(("/aws", "/ssm")) for value in values):
+                if any(
+                    value.lower().startswith(("/aws", "/ssm")) for value in path_values
+                ):
                     raise ValidationException(
                         'Filters for common parameters can\'t be prefixed with "aws" or "ssm" (case-insensitive). '
                         "When using global parameters, please specify within a global namespace."
                     )
-                for value in values:
+                for value in path_values:
                     if value.lower().startswith(("/aws", "/ssm")):
                         raise ValidationException(
                             'Filters for common parameters can\'t be prefixed with "aws" or "ssm" (case-insensitive). '
@@ -1710,14 +1832,16 @@ class SimpleSystemManagerBackend(BaseBackend):
                         )
 
             if key == "Tier":
-                for value in values:
+                tier_values = filter_obj["Values"]
+                for value in tier_values:
                     if value not in ["Standard", "Advanced", "Intelligent-Tiering"]:
                         raise InvalidFilterOption(
                             f"The following filter value is not valid: {value}. Valid values include: [Standard, Advanced, Intelligent-Tiering]."
                         )
 
             if key == "Type":
-                for value in values:
+                type_values = filter_obj["Values"]
+                for value in type_values:
                     if value not in ["String", "StringList", "SecureString"]:
                         raise InvalidFilterOption(
                             f"The following filter value is not valid: {value}. Valid values include: [String, StringList, SecureString]."
@@ -1747,7 +1871,16 @@ class SimpleSystemManagerBackend(BaseBackend):
                 f"{count} validation error{plural} detected: {errors}"
             )
 
-    def get_parameters(self, names: List[str]) -> Dict[str, Parameter]:
+    def _strip_parameter_arn(self, name: str) -> str:
+        """Reduce a full parameter ARN to the bare parameter name.
+
+        Names that are not ARNs are returned unchanged.
+        """
+        if name.startswith(self.ssm_prefix):
+            return name.replace(self.ssm_prefix, "")
+        return name
+
+    def get_parameters(self, names: list[str]) -> dict[str, Parameter]:
         result = {}
 
         if len(names) > 10:
@@ -1758,7 +1891,11 @@ class SimpleSystemManagerBackend(BaseBackend):
             )
 
         for name in set(names):
-            if name.split(":")[0] in self._parameters:
+            # Names may be full ARNs, as when reading a parameter shared from
+            # another account. Strip the prefix for the lookup, but keep the
+            # caller's original string as the key, so that the response layer
+            # reports InvalidParameters using what was actually requested.
+            if self._strip_parameter_arn(name).split(":")[0] in self._parameters:
                 try:
                     param = self.get_parameter(name)
 
@@ -1772,15 +1909,21 @@ class SimpleSystemManagerBackend(BaseBackend):
         self,
         path: str,
         recursive: bool,
-        filters: Optional[List[Dict[str, Any]]] = None,
-        next_token: Optional[str] = None,
+        filters: list[dict[str, Any]] | None = None,
+        next_token: str | None = None,
         max_results: int = 10,
-    ) -> Tuple[List[Parameter], Optional[str]]:
+    ) -> tuple[list[Parameter], str | None]:
         """Implement the get-parameters-by-path-API in the backend."""
+        if max_results > PARAMETER_BY_PATH_MAX_RESULTS:
+            raise ValidationException(
+                "1 validation error detected: "
+                f"Value {max_results} at 'maxResults' failed to satisfy constraint: "
+                f"Member must have value less than or equal to {PARAMETER_BY_PATH_MAX_RESULTS}"
+            )
 
         self._validate_parameter_filters(filters, by_path=True)
 
-        result: List[Parameter] = []
+        result: list[Parameter] = []
         # path could be with or without a trailing /. we handle this
         # difference here.
         path = path.rstrip("/") + "/"
@@ -1794,10 +1937,10 @@ class SimpleSystemManagerBackend(BaseBackend):
 
     def _get_values_nexttoken(
         self,
-        values_list: List[Parameter],
+        values_list: list[Parameter],
         max_results: int,
-        token: Optional[str] = None,
-    ) -> Tuple[List[Parameter], Optional[str]]:
+        token: str | None = None,
+    ) -> tuple[list[Parameter], str | None]:
         next_token = int(token or "0")
         max_results = int(max_results)
         values = values_list[next_token : next_token + max_results]
@@ -1807,8 +1950,8 @@ class SimpleSystemManagerBackend(BaseBackend):
         )
 
     def get_parameter_history(
-        self, name: str, next_token: Optional[str], max_results: int = 50
-    ) -> Tuple[Optional[List[Parameter]], Optional[str]]:
+        self, name: str, next_token: str | None, max_results: int = 50
+    ) -> tuple[list[Parameter] | None, str | None]:
         if max_results > PARAMETER_HISTORY_MAX_RESULTS:
             raise ValidationException(
                 "1 validation error detected: "
@@ -1823,8 +1966,8 @@ class SimpleSystemManagerBackend(BaseBackend):
         return None, None
 
     def _get_history_nexttoken(
-        self, history: List[Parameter], token: Optional[str], max_results: int
-    ) -> Tuple[List[Parameter], Optional[str]]:
+        self, history: list[Parameter], token: str | None, max_results: int
+    ) -> tuple[list[Parameter], str | None]:
         next_token = int(token or "0")
         max_results = int(max_results)
         history_to_return = history[next_token : next_token + max_results]
@@ -1837,9 +1980,10 @@ class SimpleSystemManagerBackend(BaseBackend):
         return history_to_return, None
 
     def _match_filters(
-        self, parameter: Parameter, filters: Optional[List[Dict[str, Any]]] = None
+        self, parameter: Parameter, filters: list[dict[str, Any]] | None = None
     ) -> bool:
         """Return True if the given parameter matches all the filters"""
+        parameter_tags = self.list_tags_for_resource("Parameter", parameter.name)
         for filter_obj in filters or []:
             key = filter_obj["Key"]
             values = filter_obj.get("Values", [])
@@ -1869,7 +2013,11 @@ class SimpleSystemManagerBackend(BaseBackend):
                 else:
                     continue
             elif key.startswith("tag:"):
-                what = [tag["Value"] for tag in parameter.tags if tag["Key"] == key[4:]]
+                what = [
+                    tag_value
+                    for tag_key, tag_value in parameter_tags.items()
+                    if tag_key == key[4:]
+                ]
 
             if what is None or what == []:
                 return False
@@ -1914,7 +2062,9 @@ class SimpleSystemManagerBackend(BaseBackend):
         # True if no false match (or no filters at all)
         return True
 
-    def get_parameter(self, name: str) -> Optional[Parameter]:
+    def get_parameter(self, name: str) -> Parameter | None:
+        name = self._strip_parameter_arn(name)
+
         name_parts = name.split(":")
         name_prefix = name_parts[0]
 
@@ -1937,9 +2087,8 @@ class SimpleSystemManagerBackend(BaseBackend):
                         return result[-1]
                     elif len(parameters) > 0:
                         raise ParameterVersionNotFound(
-                            "Systems Manager could not find version %s of %s. "
+                            f"Systems Manager could not find version {version_or_label} of {name_prefix}. "
                             "Verify the version and try again."
-                            % (version_or_label, name_prefix)
                         )
                 result = list(
                     filter(lambda x: version_or_label in x.labels, parameters)
@@ -1950,8 +2099,8 @@ class SimpleSystemManagerBackend(BaseBackend):
         return None
 
     def label_parameter_version(
-        self, name: str, version: int, labels: List[str]
-    ) -> Tuple[List[str], int]:
+        self, name: str, version: int, labels: list[str]
+    ) -> tuple[list[str], int]:
         previous_parameter_versions = self._parameters[name]
         if not previous_parameter_versions:
             raise ParameterNotFound(f"Parameter {name} not found.")
@@ -1987,12 +2136,10 @@ class SimpleSystemManagerBackend(BaseBackend):
             if len(label) > 100:
                 raise ValidationException(
                     "1 validation error detected: "
-                    "Value '[%s]' at 'labels' failed to satisfy constraint: "
+                    f"Value '[{label}]' at 'labels' failed to satisfy constraint: "
                     "Member must satisfy constraint: "
                     "[Member must have length less than or equal to 100, Member must have length greater than or equal to 1]"
-                    % label
                 )
-                continue
             if label not in found_parameter.labels:
                 labels_to_append.append(label)
         if (len(found_parameter.labels) + len(labels_to_append)) > 10:
@@ -2007,7 +2154,45 @@ class SimpleSystemManagerBackend(BaseBackend):
                 for label in parameter.labels[:]:
                     if label in labels_needing_removal:
                         parameter.labels.remove(label)
-        return (invalid_labels, version)
+        return invalid_labels, version
+
+    def unlabel_parameter_version(
+        self, name: str, version: int, labels: list[str]
+    ) -> tuple[list[str], list[str]]:
+        previous_parameter_versions = self._parameters[name]
+        if not previous_parameter_versions:
+            raise ParameterNotFound(f"Parameter {name} not found.")
+
+        if version is None:
+            raise ValidationException(
+                "1 validation error detected: Value 'null' at 'parameterVersion' failed to satisfy constraint: Member must not be null"
+            )
+
+        found_parameter = None
+        for parameter in previous_parameter_versions:
+            if parameter.version == version:
+                found_parameter = parameter
+                break
+
+        if not found_parameter:
+            raise ParameterVersionNotFound(
+                f"Systems Manager could not find version {version} of {name}. Verify the version and try again."
+            )
+
+        removed_labels: list[str] = []
+        invalid_labels: list[str] = []
+
+        if not labels:
+            return removed_labels, invalid_labels
+
+        for label in labels:
+            if label in found_parameter.labels:
+                found_parameter.labels.remove(label)
+                removed_labels.append(label)
+            else:
+                invalid_labels.append(label)
+
+        return removed_labels, invalid_labels
 
     def _check_for_parameter_version_limit_exception(self, name: str) -> None:
         # https://docs.aws.amazon.com/systems-manager/latest/userguide/sysman-paramstore-versions.html
@@ -2030,10 +2215,10 @@ class SimpleSystemManagerBackend(BaseBackend):
         allowed_pattern: str,
         keyid: str,
         overwrite: bool,
-        tags: List[Dict[str, str]],
+        tags: list[dict[str, str]],
         data_type: str,
-        tier: Optional[str],
-        policies: Optional[str],
+        tier: str | None,
+        policies: str | None,
     ) -> Parameter:
         if not value:
             raise ValidationException(
@@ -2119,14 +2304,14 @@ class SimpleSystemManagerBackend(BaseBackend):
                 else previous_parameter.allowed_pattern
             )
             keyid = keyid if keyid is not None else previous_parameter.keyid
-            tags = tags if tags is not None else previous_parameter.tags
             data_type = (
                 data_type if data_type is not None else previous_parameter.data_type
             )
             tier = tier if tier is not None else previous_parameter.tier
             policies = policies if policies is not None else previous_parameter.policies
-
-        last_modified_date = time.time()
+        if tier is None:
+            tier = self.default_parameter_tier
+        last_modified_date = utcnow()
         new_param = Parameter(
             account_id=self.account_id,
             name=name,
@@ -2137,7 +2322,6 @@ class SimpleSystemManagerBackend(BaseBackend):
             keyid=keyid,
             last_modified_date=last_modified_date,
             version=version,
-            tags=tags or [],
             data_type=data_type,
             tier=tier,
             policies=policies,
@@ -2151,16 +2335,16 @@ class SimpleSystemManagerBackend(BaseBackend):
         return new_param
 
     def add_tags_to_resource(
-        self, resource_type: str, resource_id: str, tags: Dict[str, str]
+        self, resource_type: str, resource_id: str, tags: dict[str, str]
     ) -> None:
-        self._validate_resource_type_and_id(resource_type, resource_id)
+        resource_id = self._validate_resource_type_and_id(resource_type, resource_id)
         for key, value in tags.items():
             self._resource_tags[resource_type][resource_id][key] = value
 
     def remove_tags_from_resource(
-        self, resource_type: str, resource_id: str, keys: List[str]
+        self, resource_type: str, resource_id: str, keys: list[str]
     ) -> None:
-        self._validate_resource_type_and_id(resource_type, resource_id)
+        resource_id = self._validate_resource_type_and_id(resource_type, resource_id)
         tags = self._resource_tags[resource_type][resource_id]
         for key in keys:
             if key in tags:
@@ -2168,23 +2352,21 @@ class SimpleSystemManagerBackend(BaseBackend):
 
     def list_tags_for_resource(
         self, resource_type: str, resource_id: str
-    ) -> Dict[str, str]:
-        self._validate_resource_type_and_id(resource_type, resource_id)
+    ) -> dict[str, str]:
+        resource_id = self._validate_resource_type_and_id(resource_type, resource_id)
         return self._resource_tags[resource_type][resource_id]
 
     def _validate_resource_type_and_id(
         self, resource_type: str, resource_id: str
-    ) -> None:
+    ) -> str:
         if resource_type == "Parameter":
-            if resource_id not in self._parameters:
+            if not (parameter := self.get_parameter(resource_id)):
                 raise InvalidResourceId()
             else:
-                return
+                return parameter.name
         elif resource_type == "Document":
             if resource_id not in self._documents:
                 raise InvalidResourceId()
-            else:
-                return
         elif resource_type == "MaintenanceWindow":
             if resource_id not in self.windows:
                 raise InvalidResourceId()
@@ -2200,21 +2382,23 @@ class SimpleSystemManagerBackend(BaseBackend):
         else:
             raise InvalidResourceId()
 
+        return resource_id
+
     def send_command(
         self,
         comment: str,
-        document_name: Optional[str],
+        document_name: str | None,
         timeout_seconds: int,
-        instance_ids: List[str],
+        instance_ids: list[str],
         max_concurrency: str,
         max_errors: str,
-        notification_config: Optional[Dict[str, Any]],
+        notification_config: dict[str, Any] | None,
         output_s3_bucket_name: str,
         output_s3_key_prefix: str,
         output_s3_region: str,
-        parameters: Dict[str, List[str]],
+        parameters: dict[str, list[str]],
         service_role_arn: str,
-        targets: List[Dict[str, Any]],
+        targets: list[dict[str, Any]],
     ) -> Command:
         command = Command(
             account_id=self.account_id,
@@ -2238,8 +2422,8 @@ class SimpleSystemManagerBackend(BaseBackend):
         return command
 
     def list_commands(
-        self, command_id: Optional[str], instance_id: Optional[str]
-    ) -> List[Command]:
+        self, command_id: str | None, instance_id: str | None
+    ) -> list[Command]:
         """
         Pagination and the Filters-parameter is not yet implemented
         """
@@ -2261,14 +2445,14 @@ class SimpleSystemManagerBackend(BaseBackend):
 
         return command
 
-    def get_commands_by_instance_id(self, instance_id: str) -> List[Command]:
+    def get_commands_by_instance_id(self, instance_id: str) -> list[Command]:
         return [
             command for command in self._commands if instance_id in command.instance_ids
         ]
 
     def get_command_invocation(
-        self, command_id: str, instance_id: str, plugin_name: Optional[str]
-    ) -> Dict[str, Any]:
+        self, command_id: str, instance_id: str, plugin_name: str | None
+    ) -> dict[str, Any]:
         command = self.get_command_by_id(command_id)
         return command.get_invocation(instance_id, plugin_name)
 
@@ -2283,7 +2467,7 @@ class SimpleSystemManagerBackend(BaseBackend):
         schedule_offset: int,
         start_date: str,
         end_date: str,
-        tags: Optional[List[Dict[str, str]]],
+        tags: list[dict[str, str]] | None,
     ) -> str:
         """
         Creates a maintenance window. No error handling or input validation has been implemented yet.
@@ -2309,20 +2493,21 @@ class SimpleSystemManagerBackend(BaseBackend):
 
     def get_maintenance_window(self, window_id: str) -> FakeMaintenanceWindow:
         """
-        The window is assumed to exist - no error handling has been implemented yet.
         The NextExecutionTime-field is not returned.
         """
+        if window_id not in self.windows:
+            raise DoesNotExistException(window_id)
         return self.windows[window_id]
 
     def describe_maintenance_windows(
-        self, filters: Optional[List[Dict[str, Any]]]
-    ) -> List[FakeMaintenanceWindow]:
+        self, filters: list[dict[str, Any]] | None
+    ) -> list[FakeMaintenanceWindow]:
         """
         Returns all windows. No pagination has been implemented yet. Only filtering for Name is supported.
         The NextExecutionTime-field is not returned.
 
         """
-        res = [window for window in self.windows.values()]
+        res = list(self.windows.values())
         if filters:
             for f in filters:
                 if f["Key"] == "Name":
@@ -2331,24 +2516,26 @@ class SimpleSystemManagerBackend(BaseBackend):
 
     def delete_maintenance_window(self, window_id: str) -> None:
         """
-        Assumes the provided WindowId exists. No error handling has been implemented yet.
+        Delete a maintenance window.
         """
+        if window_id not in self.windows:
+            raise DoesNotExistException(window_id)
         del self.windows[window_id]
 
     def create_patch_baseline(
         self,
         name: str,
         operating_system: str,
-        global_filters: Optional[Dict[str, Any]],
-        approval_rules: Optional[Dict[str, Any]],
-        approved_patches: Optional[List[str]],
-        approved_patches_compliance_level: Optional[str],
-        approved_patches_enable_non_security: Optional[bool],
-        rejected_patches: Optional[List[str]],
-        rejected_patches_action: Optional[str],
-        description: Optional[str],
-        sources: Optional[List[Dict[str, Any]]],
-        tags: Optional[List[Dict[str, str]]],
+        global_filters: dict[str, Any] | None,
+        approval_rules: dict[str, Any] | None,
+        approved_patches: list[str] | None,
+        approved_patches_compliance_level: str | None,
+        approved_patches_enable_non_security: bool | None,
+        rejected_patches: list[str] | None,
+        rejected_patches_action: str | None,
+        description: str | None,
+        sources: list[dict[str, Any]] | None,
+        tags: list[dict[str, str]] | None,
     ) -> str:
         """
         Registers a patch baseline. No error handling or input validation has been implemented yet.
@@ -2375,12 +2562,12 @@ class SimpleSystemManagerBackend(BaseBackend):
         return baseline.id
 
     def describe_patch_baselines(
-        self, filters: Optional[List[Dict[str, Any]]]
-    ) -> List[FakePatchBaseline]:
+        self, filters: list[dict[str, Any]] | None
+    ) -> list[FakePatchBaseline]:
         """
         Returns all baselines. No pagination has been implemented yet.
         """
-        baselines = [baseline for baseline in self.baselines.values()]
+        baselines = list(self.baselines.values())
         if filters:
             for f in filters:
                 if f["Key"] == "NAME_PREFIX":
@@ -2401,10 +2588,10 @@ class SimpleSystemManagerBackend(BaseBackend):
         self,
         window_id: str,
         resource_type: str,
-        targets: List[Dict[str, Any]],
-        owner_information: Optional[str],
-        name: Optional[str],
-        description: Optional[str],
+        targets: list[dict[str, Any]],
+        owner_information: str | None,
+        name: str | None,
+        description: str | None,
     ) -> str:
         """
         Registers a target with a maintenance window. No error handling has been implemented yet.
@@ -2432,8 +2619,8 @@ class SimpleSystemManagerBackend(BaseBackend):
         del window.targets[window_target_id]
 
     def describe_maintenance_window_targets(
-        self, window_id: str, filters: Optional[List[Dict[str, Any]]]
-    ) -> List[FakeMaintenanceWindowTarget]:
+        self, window_id: str, filters: list[dict[str, Any]] | None
+    ) -> list[FakeMaintenanceWindowTarget]:
         """
         Describes all targets for a maintenance window. No error handling has been implemented yet.
         """
@@ -2448,20 +2635,20 @@ class SimpleSystemManagerBackend(BaseBackend):
     def register_task_with_maintenance_window(
         self,
         window_id: str,
-        targets: Optional[List[Dict[str, Any]]],
+        targets: list[dict[str, Any]] | None,
         task_arn: str,
-        service_role_arn: Optional[str],
+        service_role_arn: str | None,
         task_type: str,
-        task_parameters: Optional[Dict[str, Any]],
-        task_invocation_parameters: Optional[Dict[str, Any]],
-        priority: Optional[int],
-        max_concurrency: Optional[str],
-        max_errors: Optional[str],
-        logging_info: Optional[Dict[str, Any]],
-        name: Optional[str],
-        description: Optional[str],
-        cutoff_behavior: Optional[str],
-        alarm_configurations: Optional[Dict[str, Any]],
+        task_parameters: dict[str, Any] | None,
+        task_invocation_parameters: dict[str, Any] | None,
+        priority: int | None,
+        max_concurrency: str | None,
+        max_errors: str | None,
+        logging_info: dict[str, Any] | None,
+        name: str | None,
+        description: str | None,
+        cutoff_behavior: str | None,
+        alarm_configurations: dict[str, Any] | None,
     ) -> str:
         window = self.get_maintenance_window(window_id)
         task = FakeMaintenanceWindowTask(
@@ -2485,8 +2672,8 @@ class SimpleSystemManagerBackend(BaseBackend):
         return task.window_task_id
 
     def describe_maintenance_window_tasks(
-        self, window_id: str, filters: List[Dict[str, Any]]
-    ) -> List[FakeMaintenanceWindowTask]:
+        self, window_id: str, filters: list[dict[str, Any]]
+    ) -> list[FakeMaintenanceWindowTask]:
         window = self.get_maintenance_window(window_id)
         tasks = [
             task
@@ -2500,6 +2687,62 @@ class SimpleSystemManagerBackend(BaseBackend):
     ) -> None:
         window = self.get_maintenance_window(window_id)
         del window.tasks[window_task_id]
+
+    def register_patch_baseline_for_patch_group(
+        self, baseline_id: str, patch_group: str
+    ) -> tuple[str, str]:
+        """register a patch group in ssm backend"""
+        if baseline_id not in self.baselines.keys():
+            raise DoesNotExistException(baseline_id)
+        baseline_os = self.baselines[baseline_id].operating_system
+        if patch_group in self.patch_groups.keys():
+            if self.patch_groups[patch_group].associations[baseline_os] != baseline_id:
+                raise AlreadyExistsException(baseline_os)
+            self.patch_groups[patch_group].associations[baseline_os] = baseline_id
+        else:
+            fake_patch_group = FakePatchGroup(patch_group, self.region_name)
+            fake_patch_group.associations[baseline_os] = baseline_id
+            self.patch_groups[patch_group] = fake_patch_group
+        return baseline_id, patch_group
+
+    def get_patch_baseline_for_patch_group(
+        self, patch_group: str, operating_system: str
+    ) -> tuple[str, str, str]:
+        """get baselineid for patch group for operating system"""
+        if patch_group not in self.patch_groups.keys():
+            fake_patch_group = FakePatchGroup("Fake", self.region_name)
+            baseline_id = fake_patch_group.associations[operating_system]
+        else:
+            baseline_id = self.patch_groups[patch_group].associations[operating_system]
+        return baseline_id, patch_group, operating_system
+
+    def deregister_patch_baseline_for_patch_group(
+        self, baseline_id: str, patch_group: str
+    ) -> tuple[str, str]:
+        """deregister a patch baseline for os on patch group, set default"""
+        if patch_group in self.patch_groups.keys():
+            if baseline_id not in self.baselines.keys():
+                raise BaselineDoesNotExistException
+            baseline_os = self.baselines[baseline_id].operating_system
+            self.patch_groups[patch_group].associations[baseline_os] = baseline_id
+        return baseline_id, patch_group
+
+    # Resource Groups Tagging API (TaggableResourcesMixin method overrides)
+    def iter_tagged_resources(self) -> Iterator[TaggedResource]:
+        for document in self._documents.values():
+            doc_name = document.describe()["Name"]
+            tags = {t["Key"]: t["Value"] for t in self._get_documents_tags(doc_name)}
+            yield TaggedResource(
+                arn=f"arn:{self.partition}:ssm:{self.region_name}:{self.account_id}:document/{doc_name}",
+                tags=tags,
+                resource_type="ssm:document",
+            )
+        for param_name in self._parameters:
+            yield TaggedResource(
+                arn=parameter_arn(self.account_id, self.region_name, param_name),
+                tags=dict(self.list_tags_for_resource("Parameter", param_name) or {}),
+                resource_type="ssm:parameter",
+            )
 
 
 ssm_backends = BackendDict(SimpleSystemManagerBackend, "ssm")

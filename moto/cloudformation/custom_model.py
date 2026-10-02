@@ -1,9 +1,9 @@
 import json
 import threading
-from typing import Any, Dict
+from typing import Any
 
 from moto import settings
-from moto.awslambda import lambda_backends
+from moto.awslambda.utils import get_backend as get_lambda_backend
 from moto.core.common_models import CloudFormationModel
 from moto.moto_api._internal import mock_random
 
@@ -16,10 +16,10 @@ class CustomModel(CloudFormationModel):
         self.request_id = request_id
         self.logical_id = logical_id
         self.resource_name = resource_name
-        self.data: Dict[str, Any] = dict()
+        self.data: dict[str, Any] = {}
         self._finished = False
 
-    def set_data(self, data: Dict[str, Any]) -> None:
+    def set_data(self, data: dict[str, Any]) -> None:
         self.data = data
         self._finished = True
 
@@ -38,7 +38,7 @@ class CustomModel(CloudFormationModel):
     def create_from_cloudformation_json(  # type: ignore[misc]
         cls,
         resource_name: str,
-        cloudformation_json: Dict[str, Any],
+        cloudformation_json: dict[str, Any],
         account_id: str,
         region_name: str,
         **kwargs: Any,
@@ -49,7 +49,7 @@ class CustomModel(CloudFormationModel):
         properties = cloudformation_json["Properties"]
         service_token = properties["ServiceToken"]
 
-        backend = lambda_backends[account_id][region_name]
+        backend = get_lambda_backend(account_id, region_name)
         fn = backend.get_function(service_token)
 
         request_id = str(mock_random.uuid4())
@@ -93,7 +93,7 @@ class CustomModel(CloudFormationModel):
         return custom_resource
 
     @classmethod
-    def has_cfn_attr(cls, attr: str) -> bool:  # pylint: disable=unused-argument
+    def has_cfn_attr(cls, attr: str) -> bool:
         # We don't know which attributes are supported for third-party resources
         return True
 

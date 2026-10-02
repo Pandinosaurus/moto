@@ -1,10 +1,15 @@
+from __future__ import annotations
+
 import json
 import os
 import re
+from datetime import datetime
 from os import environ
-from typing import Any, Dict, List, Optional, Set, cast
+from typing import Any
 
 from moto import settings
+from moto.core.parse import default_timestamp_parser as parse_timestamp
+from moto.core.utils import utcnow
 from moto.utilities.utils import load_resource
 
 from ..exceptions import (
@@ -17,45 +22,45 @@ from ..exceptions import (
 from ..utils import (
     generic_filter,
     random_ami_id,
-    utc_date_and_time,
 )
 from .core import TaggedEC2Resource
 from .instances import Instance
 
 if "MOTO_AMIS_PATH" in environ:
-    with open(environ["MOTO_AMIS_PATH"], "r", encoding="utf-8") as f:
-        AMIS: List[Dict[str, Any]] = json.load(f)
+    with open(environ["MOTO_AMIS_PATH"], encoding="utf-8") as f:
+        AMIS: list[dict[str, Any]] = json.load(f)
 else:
-    AMIS = load_resource(__name__, "../resources/amis.json")
+    AMIS = load_resource("ec2/resources/amis.json")
 
 
 class Ami(TaggedEC2Resource):
-    def __init__(  # pylint: disable=dangerous-default-value
+    def __init__(
         self,
         ec2_backend: Any,
         ami_id: str,
-        instance: Optional[Instance] = None,
-        source_ami: Optional["Ami"] = None,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-        owner_id: Optional[str] = None,
-        owner_alias: Optional[str] = None,
+        instance: Instance | None = None,
+        source_ami: Ami | None = None,
+        name: str | None = None,
+        description: str | None = None,
+        owner_id: str | None = None,
+        owner_alias: str | None = None,
         public: bool = False,
-        virtualization_type: Optional[str] = None,
-        architecture: Optional[str] = None,
+        virtualization_type: str | None = None,
+        architecture: str | None = None,
         state: str = "available",
-        creation_date: Optional[str] = None,
-        platform: Optional[str] = None,
+        creation_date: datetime | None = None,
+        platform: str | None = None,
         image_type: str = "machine",
-        image_location: Optional[str] = None,
-        hypervisor: Optional[str] = None,
+        image_location: str | None = None,
+        hypervisor: str | None = None,
         root_device_type: str = "standard",
         root_device_name: str = "/dev/sda1",
         sriov: str = "simple",
         region_name: str = "us-east-1a",
-        snapshot_description: Optional[str] = None,
-        product_codes: Set[str] = set(),
+        snapshot_description: str | None = None,
+        product_codes: set[str] | None = None,
         boot_mode: str = "uefi",
+        tags: dict[str, Any] | None = None,
     ):
         self.ec2_backend = ec2_backend
         self.id = ami_id
@@ -74,9 +79,13 @@ class Ami(TaggedEC2Resource):
         self.root_device_name = root_device_name
         self.root_device_type = root_device_type
         self.sriov = sriov
-        self.creation_date = creation_date or utc_date_and_time()
-        self.product_codes = product_codes
+        self.creation_date = creation_date or utcnow()
+        self.product_codes = product_codes or set()
         self.boot_mode = boot_mode
+        self.instance_id: str | None = None
+
+        if tags is not None:
+            self.add_tags(tags)
 
         if instance:
             self.instance = instance
@@ -101,7 +110,7 @@ class Ami(TaggedEC2Resource):
             if not description:
                 self.description = source_ami.description
 
-        self.launch_permissions: List[Dict[str, str]] = []
+        self.launch_permissions: list[dict[str, str]] = []
 
         if public:
             self.launch_permissions.append({"Group": "all"})
@@ -121,12 +130,24 @@ class Ami(TaggedEC2Resource):
         return {"Group": "all"} in self.launch_permissions
 
     @property
-    def is_public_string(self) -> str:
-        return str(self.is_public).lower()
+    def block_device_mappings(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "DeviceName": self.root_device_name,
+                "Ebs": {
+                    "SnapshotId": self.ebs_snapshot.id,
+                    "VolumeSize": 15,
+                    "DeleteOnTermination": False,
+                    "VolumeType": "standard",
+                },
+            }
+        ]
 
-    def get_filter_value(
-        self, filter_name: str, method_name: Optional[str] = None
-    ) -> Any:
+    @property
+    def source_instance_id(self) -> str | None:
+        return self.instance_id
+
+    def get_filter_value(self, filter_name: str, method_name: str | None = None) -> Any:
         if filter_name == "virtualization-type":
             return self.virtualization_type
         elif filter_name == "kernel-id":
@@ -136,7 +157,7 @@ class Ami(TaggedEC2Resource):
         elif filter_name == "image-id":
             return self.id
         elif filter_name == "is-public":
-            return self.is_public_string
+            return self.is_public
         elif filter_name == "state":
             return self.state
         elif filter_name == "name":
@@ -149,6 +170,8 @@ class Ami(TaggedEC2Resource):
             return self.product_codes
         elif filter_name == "product-code.type":
             return "marketplace"  # devpay is not (yet?) supported
+        elif filter_name == "source-instance-id":
+            return self.source_instance_id
         else:
             return super().get_filter_value(filter_name, "DescribeImages")
 
@@ -157,8 +180,8 @@ class AmiBackend:
     AMI_REGEX = re.compile("ami-[a-z0-9]+")
 
     def __init__(self) -> None:
-        self.amis: Dict[str, Ami] = {}
-        self.deleted_amis: List[str] = list()
+        self.amis: dict[str, Ami] = {}
+        self.deleted_amis: list[str] = []
         self._load_amis()
 
     def _load_amis(self) -> None:
@@ -169,20 +192,23 @@ class AmiBackend:
             # we are assuming the default loaded amis are owned by amazon
             # owner_alias is required for terraform owner filters
             ami["owner_alias"] = "amazon"
+            # Parse the create_date into a datetime, in case this hasn't happened before
+            if (create_date := ami.get("creation_date")) and isinstance(
+                create_date, str
+            ):
+                ami["creation_date"] = parse_timestamp(create_date)
             self.amis[ami_id] = Ami(self, **ami)
         if "MOTO_AMIS_PATH" not in environ:
             for path in ["latest_amis", "ecs/optimized_amis"]:
                 try:
-                    latest_amis = cast(
-                        List[Dict[str, Any]],
-                        load_resource(
-                            __name__,
-                            f"../resources/{path}/{self.region_name}.json",  # type: ignore[attr-defined]
-                        ),
+                    latest_amis: list[dict[str, Any]] = load_resource(
+                        f"ec2/resources/{path}/{self.region_name}.json",  # type: ignore[attr-defined]
                     )
                     for ami in latest_amis:
                         ami_id = ami["ami_id"]
                         ami["owner_alias"] = "amazon"
+                        if ami.get("creation_date"):
+                            ami["creation_date"] = parse_timestamp(ami["creation_date"])
                         self.amis[ami_id] = Ami(self, **ami)
                 except FileNotFoundError:
                     # Will error on unknown (new) regions - just return an empty list here
@@ -193,7 +219,7 @@ class AmiBackend:
         instance_id: str,
         name: str,
         description: str,
-        tag_specifications: List[Dict[str, Any]],
+        tag_specifications: list[dict[str, Any]],
     ) -> Ami:
         # TODO: check that instance exists and pull info from it.
         ami_id = random_ami_id()
@@ -202,7 +228,7 @@ class AmiBackend:
         for tag_specification in tag_specifications:
             resource_type = tag_specification["ResourceType"]
             if resource_type == "image":
-                tags += tag_specification["Tag"]
+                tags += tag_specification["Tags"]
             elif resource_type == "snapshot":
                 raise NotImplementedError()
             else:
@@ -227,8 +253,8 @@ class AmiBackend:
         self,
         source_image_id: str,
         source_region: str,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
+        name: str | None = None,
+        description: str | None = None,
     ) -> Ami:
         from ..models import ec2_backends
 
@@ -248,11 +274,11 @@ class AmiBackend:
 
     def describe_images(
         self,
-        ami_ids: Optional[List[str]] = None,
-        filters: Optional[Dict[str, Any]] = None,
-        exec_users: Optional[List[str]] = None,
-        owners: Optional[List[str]] = None,
-    ) -> List[Ami]:
+        ami_ids: list[str] | None = None,
+        filters: dict[str, Any] | None = None,
+        exec_users: list[str] | None = None,
+        owners: list[str] | None = None,
+    ) -> list[Ami]:
         images = list(self.amis.copy().values())
 
         if ami_ids and len(ami_ids):
@@ -276,19 +302,26 @@ class AmiBackend:
             if exec_users:
                 tmp_images = []
                 for ami in images:
-                    for user_id in exec_users:
-                        for lp in ami.launch_permissions:
-                            if lp.get("UserId") == user_id:
-                                tmp_images.append(ami)
+                    if ami.is_public:
+                        tmp_images.append(ami)
+                    else:
+                        # support filtering by ExecutableUsers=['self']
+                        if "self" in exec_users:
+                            exec_users = list(set(exec_users))
+                            exec_users.remove("self")
+                            exec_users.append(self.account_id)  # type: ignore[attr-defined]
+
+                        for user_id in exec_users:
+                            for lp in ami.launch_permissions:
+                                if lp.get("UserId") == user_id:
+                                    tmp_images.append(ami)
                 images = tmp_images
 
             # Limit by owner ids
             if owners:
                 # support filtering by Owners=['self']
                 if "self" in owners:
-                    owners = list(
-                        map(lambda o: self.account_id if o == "self" else o, owners)  # type: ignore[attr-defined]
-                    )
+                    owners = [self.account_id if o == "self" else o for o in owners]  # type: ignore[attr-defined]
                 images = [
                     ami
                     for ami in images
@@ -310,7 +343,7 @@ class AmiBackend:
         else:
             raise InvalidAMIIdError(ami_id)
 
-    def validate_permission_targets(self, permissions: List[Dict[str, str]]) -> None:
+    def validate_permission_targets(self, permissions: list[dict[str, str]]) -> None:
         for perm in permissions:
             # If anything is invalid, nothing is added. (No partial success.)
             # AWS docs:
@@ -328,8 +361,8 @@ class AmiBackend:
     def modify_image_attribute(
         self,
         ami_id: str,
-        launch_permissions_to_add: List[Dict[str, str]],
-        launch_permissions_to_remove: List[Dict[str, str]],
+        launch_permissions_to_add: list[dict[str, str]],
+        launch_permissions_to_remove: list[dict[str, str]],
     ) -> None:
         ami = self.describe_images(ami_ids=[ami_id])[0]
         self.validate_permission_targets(launch_permissions_to_add)
@@ -345,7 +378,7 @@ class AmiBackend:
                 pass
 
     def register_image(
-        self, name: Optional[str] = None, description: Optional[str] = None
+        self, name: str | None = None, description: str | None = None
     ) -> Ami:
         ami_id = random_ami_id()
         ami = Ami(
@@ -361,3 +394,17 @@ class AmiBackend:
 
     def describe_image_attribute(self, ami_id: str, attribute_name: str) -> Any:
         return self.amis[ami_id].__getattribute__(attribute_name)
+
+    def disable_image(self, ami_id: str) -> None:
+        if ami_id in self.deleted_amis:
+            raise UnvailableAMIIdError(ami_id)
+        if ami_id not in self.amis:
+            raise InvalidAMIIdError(ami_id)
+        self.amis[ami_id].state = "disabled"
+
+    def enable_image(self, ami_id: str) -> None:
+        if ami_id in self.deleted_amis:
+            raise UnvailableAMIIdError(ami_id)
+        if ami_id not in self.amis:
+            raise InvalidAMIIdError(ami_id)
+        self.amis[ami_id].state = "available"

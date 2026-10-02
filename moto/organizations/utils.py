@@ -1,20 +1,23 @@
 import re
 import string
-from typing import Pattern, Union
+from re import Pattern
 
 from moto.moto_api._internal import mock_random as random
 
 MASTER_ACCOUNT_EMAIL = "master@example.com"
-DEFAULT_POLICY_ID = "p-FullAWSAccess"
+DEFAULT_SCP_POLICY_ID = "p-FullAWSAccess"
+DEFAULT_RCP_POLICY_ID = "p-RCPFullAWSAccess"
 ORGANIZATION_ARN_FORMAT = "arn:{0}:organizations::{1}:organization/{2}"
 MASTER_ACCOUNT_ARN_FORMAT = "arn:{0}:organizations::{1}:account/{2}/{1}"
 ACCOUNT_ARN_FORMAT = "arn:{0}:organizations::{1}:account/{2}/{3}"
 ROOT_ARN_FORMAT = "arn:{0}:organizations::{1}:root/{2}/{3}"
 OU_ARN_FORMAT = "arn:{0}:organizations::{1}:ou/{2}/{3}"
 SCP_ARN_FORMAT = "arn:{0}:organizations::{1}:policy/{2}/service_control_policy/{3}"
+RCP_ARN_FORMAT = "arn:{0}:organizations::{1}:policy/{2}/resource_control_policy/{3}"
 AI_POLICY_ARN_FORMAT = (
     "arn:{0}:organizations::{1}:policy/{2}/aiservices_opt_out_policy/{3}"
 )
+TAG_POLICY_ARN_FORMAT = "arn:{0}:organizations::{1}:policy/{2}/tag_policy/{3}"
 
 CHARSET = string.ascii_lowercase + string.digits
 ORG_ID_SIZE = 10
@@ -30,7 +33,9 @@ ROOT_ID_REGEX = rf"r-[a-z0-9]{{{ROOT_ID_SIZE}}}"
 OU_ID_REGEX = rf"ou-[a-z0-9]{{{ROOT_ID_SIZE}}}-[a-z0-9]{{{OU_ID_SUFFIX_SIZE}}}"
 ACCOUNT_ID_REGEX = rf"[0-9]{{{ACCOUNT_ID_SIZE}}}"
 CREATE_ACCOUNT_STATUS_ID_REGEX = rf"car-[a-z0-9]{{{CREATE_ACCOUNT_STATUS_ID_SIZE}}}"
-POLICY_ID_REGEX = rf"{DEFAULT_POLICY_ID}|p-[a-z0-9]{{{POLICY_ID_SIZE}}}"
+POLICY_ID_REGEX = (
+    rf"{DEFAULT_SCP_POLICY_ID}|{DEFAULT_RCP_POLICY_ID}|p-[a-z0-9]{{{POLICY_ID_SIZE}}}"
+)
 
 PAGINATION_MODEL = {
     "list_accounts": {
@@ -45,14 +50,28 @@ PAGINATION_MODEL = {
         "limit_key": "max_results",
         "limit_default": 20,
         "result_key": "Accounts",
-        "unique_attribute": "JoinedTimestamp",
+        "unique_attribute": "id",
+    },
+    "list_policies": {
+        "input_token": "next_token",
+        "limit_key": "max_results",
+        "limit_default": 20,
+        "result_key": "Policies",
+        "unique_attribute": "Id",
+    },
+    "list_policies_for_target": {
+        "input_token": "next_token",
+        "limit_key": "max_results",
+        "limit_default": 20,
+        "result_key": "Policies",
+        "unique_attribute": "Id",
     },
     "list_organizational_units_for_parent": {
         "input_token": "next_token",
         "limit_key": "max_results",
         "limit_default": 20,
         "result_key": "OrganizationalUnits",
-        "unique_attribute": "Id",
+        "unique_attribute": "id",
     },
 }
 
@@ -108,7 +127,7 @@ def make_random_policy_id() -> str:
     return "p-" + "".join(random.choice(CHARSET) for x in range(POLICY_ID_SIZE))
 
 
-def fullmatch(regex: Union[Pattern[str], str], s: str, flags: int = 0) -> bool:
+def fullmatch(regex: Pattern[str] | str, s: str, flags: int = 0) -> bool:
     """Emulate python-3.4 re.fullmatch()."""
     m = re.match(regex, s, flags=flags)
     if m and m.span()[1] == len(s):

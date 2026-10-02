@@ -21,6 +21,7 @@ mq
 - [X] create_tags
 - [X] create_user
 - [X] delete_broker
+- [ ] delete_configuration
 - [X] delete_tags
 - [X] delete_user
 - [X] describe_broker
@@ -28,17 +29,18 @@ mq
 - [ ] describe_broker_instance_options
 - [X] describe_configuration
 - [X] describe_configuration_revision
+- [ ] describe_shared_resources
 - [X] describe_user
 - [X] list_brokers
   
-        Pagination is not yet implemented
-        
+Pagination is not yet implemented
+
 
 - [ ] list_configuration_revisions
 - [X] list_configurations
   
-        Pagination has not yet been implemented.
-        
+Pagination has not yet been implemented.
+
 
 - [X] list_tags
 - [X] list_users
@@ -47,8 +49,8 @@ mq
 - [X] update_broker
 - [X] update_configuration
   
-        No validation occurs on the provided XML. The authenticationStrategy may be changed depending on the provided configuration.
-        
+No validation occurs on the provided XML. The authenticationStrategy may be changed depending on the provided configuration.
+
 
 - [X] update_user
 

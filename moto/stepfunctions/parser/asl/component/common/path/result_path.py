@@ -1,5 +1,5 @@
 import copy
-from typing import Final, Optional
+from typing import Final
 
 from jsonpath_ng import parse
 
@@ -10,13 +10,13 @@ from moto.stepfunctions.parser.asl.eval.environment import Environment
 class ResultPath(EvalComponent):
     DEFAULT_PATH: Final[str] = "$"
 
-    result_path_src: Final[Optional[str]]
+    result_path_src: Final[str | None]
 
-    def __init__(self, result_path_src: Optional[str]):
+    def __init__(self, result_path_src: str | None):
         self.result_path_src = result_path_src
 
     def _eval_body(self, env: Environment) -> None:
-        state_input = copy.deepcopy(env.inp)
+        state_input = env.states.get_input()
 
         # Discard task output if there is one, and set the output ot be the state's input.
         if self.result_path_src is None:

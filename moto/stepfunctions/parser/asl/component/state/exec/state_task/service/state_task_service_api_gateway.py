@@ -4,7 +4,7 @@ import http
 import json
 import logging
 from json import JSONDecodeError
-from typing import Any, Dict, Final, Optional, Set, TypedDict, Union
+from typing import Any, Final, TypedDict
 from urllib.parse import urlencode, urljoin
 
 import requests
@@ -19,6 +19,7 @@ from moto.stepfunctions.parser.asl.component.common.error_name.failure_event imp
     FailureEvent,
 )
 from moto.stepfunctions.parser.asl.component.state.exec.state_task.service.resource import (
+    ResourceCondition,
     ResourceRuntimePart,
 )
 from moto.stepfunctions.parser.asl.component.state.exec.state_task.service.state_task_service_callback import (
@@ -29,6 +30,10 @@ from moto.stepfunctions.parser.asl.eval.event.event_detail import EventDetails
 
 LOG = logging.getLogger(__name__)
 
+_SUPPORTED_INTEGRATION_PATTERNS: set[ResourceCondition] = {
+    ResourceCondition.WaitForTaskToken,
+}
+
 APPLICATION_JSON = "application/json"
 HEADER_CONTENT_TYPE = "Content-Type"
 PATH_USER_REQUEST = "_user_request_"
@@ -38,8 +43,8 @@ Headers = dict
 Stage = str
 Path = str
 QueryParameters = dict
-RequestBody = Union[dict, str]
-ResponseBody = Union[dict, str]
+RequestBody = dict | str
+ResponseBody = dict | str
 StatusCode = int
 StatusText = str
 AllowNullValues = bool
@@ -64,13 +69,13 @@ class AuthType(str):
 class TaskParameters(TypedDict):
     ApiEndpoint: ApiEndpoint
     Method: Method
-    Headers: Optional[Headers]
-    Stage: Optional[Stage]
-    Path: Optional[Path]
-    QueryParameters: Optional[QueryParameters]
-    RequestBody: Optional[RequestBody]
-    AllowNullValues: Optional[AllowNullValues]
-    AuthType: Optional[AuthType]
+    Headers: Headers | None
+    Stage: Stage | None
+    Path: Path | None
+    QueryParameters: QueryParameters | None
+    RequestBody: RequestBody | None
+    AllowNullValues: AllowNullValues | None
+    AuthType: AuthType | None
 
 
 class InvokeOutput(TypedDict):
@@ -94,12 +99,12 @@ class SfnGatewayException(Exception):
 
 
 class StateTaskServiceApiGateway(StateTaskServiceCallback):
-    _SUPPORTED_API_PARAM_BINDINGS: Final[Dict[str, Set[str]]] = {
+    _SUPPORTED_API_PARAM_BINDINGS: Final[dict[str, set[str]]] = {
         SupportedApiCalls.invoke: {"ApiEndpoint", "Method"}
     }
 
-    _FORBIDDEN_HTTP_HEADERS_PREFIX: Final[Set[str]] = {"X-Forwarded", "X-Amz", "X-Amzn"}
-    _FORBIDDEN_HTTP_HEADERS: Final[Set[str]] = {
+    _FORBIDDEN_HTTP_HEADERS_PREFIX: Final[set[str]] = {"X-Forwarded", "X-Amz", "X-Amzn"}
+    _FORBIDDEN_HTTP_HEADERS: Final[set[str]] = {
         "Authorization",
         "Connection",
         "Content-md5",
@@ -116,14 +121,17 @@ class StateTaskServiceApiGateway(StateTaskServiceCallback):
         "Www-Authenticate",
     }
 
-    def _get_supported_parameters(self) -> Optional[Set[str]]:
+    def __init__(self):
+        super().__init__(supported_integration_patterns=_SUPPORTED_INTEGRATION_PATTERNS)
+
+    def _get_supported_parameters(self) -> set[str] | None:
         return self._SUPPORTED_API_PARAM_BINDINGS.get(self.resource.api_action.lower())
 
     def _normalise_parameters(
         self,
-        parameters: Dict[str, Any],
-        boto_service_name: Optional[str] = None,
-        service_action_name: Optional[str] = None,
+        parameters: dict[str, Any],
+        boto_service_name: str | None = None,
+        service_action_name: str | None = None,
     ) -> None:
         # ApiGateway does not support botocore request relay.
         pass
@@ -131,14 +139,14 @@ class StateTaskServiceApiGateway(StateTaskServiceCallback):
     def _normalise_response(
         self,
         response: Any,
-        boto_service_name: Optional[str] = None,
-        service_action_name: Optional[str] = None,
+        boto_service_name: str | None = None,
+        service_action_name: str | None = None,
     ) -> None:
         # ApiGateway does not support botocore request relay.
         pass
 
     @staticmethod
-    def _query_parameters_of(parameters: TaskParameters) -> Optional[str]:
+    def _query_parameters_of(parameters: TaskParameters) -> str | None:
         query_str = None
         query_parameters = parameters.get("QueryParameters")
         # TODO: add support for AllowNullValues.
@@ -152,8 +160,8 @@ class StateTaskServiceApiGateway(StateTaskServiceCallback):
         return query_str
 
     @staticmethod
-    def _headers_of(parameters: TaskParameters) -> Optional[dict]:
-        headers = parameters.get("Headers", dict())
+    def _headers_of(parameters: TaskParameters) -> dict | None:
+        headers = parameters.get("Headers", {})
         if headers:
             for key in headers.keys():
                 # TODO: the following check takes place at parse time.
@@ -202,8 +210,8 @@ class StateTaskServiceApiGateway(StateTaskServiceCallback):
             response_body = response.json()
         except JSONDecodeError:
             response_body = response.text
-            if response_body == json.dumps(dict()):
-                response_body = dict()
+            if response_body == json.dumps({}):
+                response_body = {}
 
         headers.pop("server", None)
         if "date" in headers:
@@ -253,6 +261,7 @@ class StateTaskServiceApiGateway(StateTaskServiceCallback):
         env: Environment,
         resource_runtime_part: ResourceRuntimePart,
         normalised_parameters: dict,
+        task_credentials: Any,
     ):
         task_parameters: TaskParameters = normalised_parameters
 

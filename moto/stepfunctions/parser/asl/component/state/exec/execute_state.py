@@ -3,7 +3,7 @@ import copy
 import logging
 import threading
 from threading import Thread
-from typing import Any, List, Optional
+from typing import Any
 
 from moto.stepfunctions.parser.api import HistoryEventType, TaskFailedEventDetails
 from moto.stepfunctions.parser.asl.component.common.catch.catch_decl import CatchDecl
@@ -41,6 +41,7 @@ from moto.stepfunctions.parser.asl.component.state.state import CommonStateField
 from moto.stepfunctions.parser.asl.component.state.state_props import StateProps
 from moto.stepfunctions.parser.asl.eval.environment import Environment
 from moto.stepfunctions.parser.asl.eval.event.event_detail import EventDetails
+from moto.stepfunctions.parser.utils import TMP_THREADS
 
 LOG = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class ExecutionState(CommonStateField, abc.ABC):
     def __init__(
         self,
         state_entered_event_type: HistoryEventType,
-        state_exited_event_type: Optional[HistoryEventType],
+        state_exited_event_type: HistoryEventType | None,
     ):
         super().__init__(
             state_entered_event_type=state_entered_event_type,
@@ -59,20 +60,20 @@ class ExecutionState(CommonStateField, abc.ABC):
         # Specifies where (in the input) to place the results of executing the state_task that's specified in Resource.
         # The input is then filtered as specified by the OutputPath field (if present) before being used as the
         # state's output.
-        self.result_path: Optional[ResultPath] = None
+        self.result_path: ResultPath | None = None
 
         # ResultSelector (Optional)
         # Pass a collection of key value pairs, where the values are static or selected from the result.
-        self.result_selector: Optional[ResultSelector] = None
+        self.result_selector: ResultSelector | None = None
 
         # Retry (Optional)
         # An array of objects, called Retriers, that define a retry policy if the state encounters runtime errors.
-        self.retry: Optional[RetryDecl] = None
+        self.retry: RetryDecl | None = None
 
         # Catch (Optional)
         # An array of objects, called Catchers, that define a fallback state. This state is executed if the state
         # encounters runtime errors and its retry policy is exhausted or isn't defined.
-        self.catch: Optional[CatchDecl] = None
+        self.catch: CatchDecl | None = None
 
         # TimeoutSeconds (Optional)
         # If the state_task runs longer than the specified seconds, this state fails with a States.Timeout error name.
@@ -98,7 +99,7 @@ class ExecutionState(CommonStateField, abc.ABC):
         # HeartbeatSecondsPath. When resolved, the reference path must select fields whose values are positive integers.
         # A Task state cannot include both HeartbeatSeconds and HeartbeatSecondsPath
         # HeartbeatSeconds and HeartbeatSecondsPath fields are encoded by the Heartbeat type.
-        self.heartbeat: Optional[Heartbeat] = None
+        self.heartbeat: Heartbeat | None = None
 
     def from_state_props(self, state_props: StateProps) -> None:
         super().from_state_props(state_props=state_props)
@@ -136,6 +137,7 @@ class ExecutionState(CommonStateField, abc.ABC):
             "State Task encountered an unhandled exception that lead to a State.Runtime error."
         )
         return FailureEvent(
+            env=env,
             error_name=StatesErrorName(typ=StatesErrorNameType.StatesRuntime),
             event_type=HistoryEventType.TaskFailed,
             event_details=EventDetails(
@@ -156,21 +158,17 @@ class ExecutionState(CommonStateField, abc.ABC):
         self.retry.eval(env)
         res: RetryOutcome = env.stack.pop()
         if res == RetryOutcome.CanRetry:
-            retry_count = env.context_object_manager.context_object["State"][
+            retry_count = env.states.context_object.context_object_data["State"][
                 "RetryCount"
             ]
-            env.context_object_manager.context_object["State"]["RetryCount"] = (
+            env.states.context_object.context_object_data["State"]["RetryCount"] = (
                 retry_count + 1
             )
         return res
 
-    def _handle_catch(
-        self, env: Environment, failure_event: FailureEvent
-    ) -> CatchOutcome:
+    def _handle_catch(self, env: Environment, failure_event: FailureEvent) -> None:
         env.stack.append(failure_event)
         self.catch.eval(env)
-        res: CatchOutcome = env.stack.pop()
-        return res
 
     def _handle_uncaught(self, env: Environment, failure_event: FailureEvent) -> None:
         self._terminate_with_event(env=env, failure_event=failure_event)
@@ -184,10 +182,10 @@ class ExecutionState(CommonStateField, abc.ABC):
         timeout_seconds: int = env.stack.pop()
 
         frame: Environment = env.open_frame()
-        frame.inp = copy.deepcopy(env.inp)
+        frame.states.reset(input_value=env.states.get_input())
         frame.stack = copy.deepcopy(env.stack)
-        execution_outputs: List[Any] = list()
-        execution_exceptions: List[Optional[Exception]] = [None]
+        execution_outputs: list[Any] = []
+        execution_exceptions: list[Exception | None] = [None]
         terminated_event = threading.Event()
 
         def _exec_and_notify():
@@ -198,8 +196,10 @@ class ExecutionState(CommonStateField, abc.ABC):
                 execution_exceptions.append(ex)
             terminated_event.set()
 
-        thread = Thread(target=_exec_and_notify)
+        thread = Thread(target=_exec_and_notify, daemon=True)
+        TMP_THREADS.append(thread)
         thread.start()
+
         finished_on_time: bool = terminated_event.wait(timeout_seconds)
         frame.set_ended()
         env.close_frame(frame)
@@ -214,6 +214,12 @@ class ExecutionState(CommonStateField, abc.ABC):
         execution_output = execution_outputs.pop()
         env.stack.append(execution_output)
 
+        if not self._is_language_query_jsonpath():
+            env.states.set_result(execution_output)
+
+        if self.assign_decl:
+            self.assign_decl.eval(env=env)
+
         if self.result_selector:
             self.result_selector.eval(env=env)
 
@@ -221,24 +227,47 @@ class ExecutionState(CommonStateField, abc.ABC):
             self.result_path.eval(env)
         else:
             res = env.stack.pop()
-            env.inp = res
+            env.states.reset(input_value=res)
+
+    @staticmethod
+    def _construct_error_output_value(failure_event: FailureEvent) -> Any:
+        specs_event_details = list(failure_event.event_details.values())
+        if (
+            len(specs_event_details) != 1
+            and "error" in specs_event_details
+            and "cause" in specs_event_details
+        ):
+            raise RuntimeError(
+                f"Internal Error: invalid event details declaration in FailureEvent: '{failure_event}'."
+            )
+        spec_event_details: dict = list(failure_event.event_details.values())[0]
+        return {
+            # If no cause or error fields are given, AWS binds an empty string; otherwise it attaches the value.
+            "Error": spec_event_details.get("error", ""),
+            "Cause": spec_event_details.get("cause", ""),
+        }
 
     def _eval_state(self, env: Environment) -> None:
         # Initialise the retry counter for execution states.
-        env.context_object_manager.context_object["State"]["RetryCount"] = 0
+        env.states.context_object.context_object_data["State"]["RetryCount"] = 0
 
         # Attempt to evaluate the state's logic through until it's successful, caught, or retries have run out.
-        while True:
+        while env.is_running():
             try:
                 self._evaluate_with_timeout(env)
                 break
             except Exception as ex:
                 failure_event: FailureEvent = self._from_error(env=env, ex=ex)
-                env.event_history.add_event(
+                env.event_manager.add_event(
                     context=env.event_history_context,
-                    hist_type_event=failure_event.event_type,
-                    event_detail=failure_event.event_details,
+                    event_type=failure_event.event_type,
+                    event_details=failure_event.event_details,
                 )
+                error_output = self._construct_error_output_value(
+                    failure_event=failure_event
+                )
+                env.states.set_error_output(error_output)
+                env.states.set_result(error_output)
 
                 if self.retry:
                     retry_outcome: RetryOutcome = self._handle_retry(
@@ -248,10 +277,17 @@ class ExecutionState(CommonStateField, abc.ABC):
                         continue
 
                 if self.catch:
-                    catch_outcome: CatchOutcome = self._handle_catch(
-                        env=env, failure_event=failure_event
-                    )
+                    self._handle_catch(env=env, failure_event=failure_event)
+                    catch_outcome: CatchOutcome = env.stack[-1]
                     if catch_outcome == CatchOutcome.Caught:
                         break
 
                 self._handle_uncaught(env=env, failure_event=failure_event)
+
+    def _eval_state_output(self, env: Environment) -> None:
+        # Obtain a reference to the state output.
+        output = env.stack[-1]
+        # CatcherOutputs (i.e. outputs of Catch blocks) are never subjects of output normalisers,
+        # the entire value is instead passed by value as input to the next state, or program output.
+        if not isinstance(output, CatchOutcome):
+            super()._eval_state_output(env=env)

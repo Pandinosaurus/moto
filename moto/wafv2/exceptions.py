@@ -13,6 +13,26 @@ class WAFV2DuplicateItemException(WAFv2ClientError):
         )
 
 
+class WAFV2InsufficientInformationException(WAFv2ClientError):
+    def __init__(
+        self,
+        name: str | None,
+        scope: str | None,
+        id: str | None,
+        arn: str | None,
+    ) -> None:
+        super().__init__(
+            "AcessDeniedException",
+            (
+                "Critical information is missing in your request: "
+                f"GetRuleGroupRequest(name={name if name else 'null'}, "
+                f"scope={scope if scope else 'null'}, "
+                f"id={id if id else 'null'}, "
+                f"aRN={arn if arn is not None else 'null'})."
+            ),
+        )
+
+
 class WAFNonexistentItemException(WAFv2ClientError):
     def __init__(self) -> None:
         super().__init__(

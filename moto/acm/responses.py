@@ -1,13 +1,9 @@
 import base64
-import json
-from typing import Dict, List, Tuple, Union
 
-from moto.core.responses import BaseResponse
+from moto.core.responses import ActionResult, BaseResponse, EmptyResult
 
-from .exceptions import AWSValidationException
+from .exceptions import AWSError, AWSValidationException
 from .models import AWSCertificateManagerBackend, acm_backends
-
-GENERIC_RESPONSE_TYPE = Union[str, Tuple[str, Dict[str, int]]]
 
 
 class AWSCertificateManagerResponse(BaseResponse):
@@ -18,58 +14,46 @@ class AWSCertificateManagerResponse(BaseResponse):
     def acm_backend(self) -> AWSCertificateManagerBackend:
         return acm_backends[self.current_account][self.region]
 
-    def add_tags_to_certificate(self) -> GENERIC_RESPONSE_TYPE:
+    def add_tags_to_certificate(self) -> ActionResult:
         arn = self._get_param("CertificateArn")
         tags = self._get_param("Tags")
 
         if arn is None:
             msg = "A required parameter for the specified action is not supplied."
-            return (
-                json.dumps({"__type": "MissingParameter", "message": msg}),
-                dict(status=400),
-            )
+            raise AWSValidationException(msg)
 
         self.acm_backend.add_tags_to_certificate(arn, tags)
 
-        return ""
+        return EmptyResult()
 
-    def delete_certificate(self) -> GENERIC_RESPONSE_TYPE:
+    def delete_certificate(self) -> ActionResult:
         arn = self._get_param("CertificateArn")
 
         if arn is None:
             msg = "A required parameter for the specified action is not supplied."
-            return (
-                json.dumps({"__type": "MissingParameter", "message": msg}),
-                dict(status=400),
-            )
+            raise AWSValidationException(msg)
 
         self.acm_backend.delete_certificate(arn)
 
-        return ""
+        return EmptyResult()
 
-    def describe_certificate(self) -> GENERIC_RESPONSE_TYPE:
+    def describe_certificate(self) -> ActionResult:
         arn = self._get_param("CertificateArn")
 
         if arn is None:
             msg = "A required parameter for the specified action is not supplied."
-            return (
-                json.dumps({"__type": "MissingParameter", "message": msg}),
-                dict(status=400),
-            )
+            raise AWSValidationException(msg)
 
         cert_bundle = self.acm_backend.describe_certificate(arn)
 
-        return json.dumps(cert_bundle.describe())
+        return ActionResult(result=cert_bundle.describe())
 
-    def get_certificate(self) -> GENERIC_RESPONSE_TYPE:
+    def get_certificate(self) -> ActionResult:
         arn = self._get_param("CertificateArn")
 
         if arn is None:
             msg = "A required parameter for the specified action is not supplied."
-            return (
-                json.dumps({"__type": "MissingParameter", "message": msg}),
-                dict(status=400),
-            )
+            raise AWSValidationException(msg)
 
         cert_bundle = self.acm_backend.get_certificate(arn)
 
@@ -77,9 +61,9 @@ class AWSCertificateManagerResponse(BaseResponse):
             "Certificate": cert_bundle.cert.decode(),
             "CertificateChain": cert_bundle.chain.decode(),
         }
-        return json.dumps(result)
+        return ActionResult(result=result)
 
-    def import_certificate(self) -> str:
+    def import_certificate(self) -> ActionResult:
         """
         Returns errors on:
         Certificate, PrivateKey or Chain not being properly formatted
@@ -124,29 +108,32 @@ class AWSCertificateManagerResponse(BaseResponse):
             certificate, private_key, chain=chain, arn=current_arn, tags=tags
         )
 
-        return json.dumps({"CertificateArn": arn})
+        return ActionResult(result={"CertificateArn": arn})
 
-    def list_certificates(self) -> str:
+    def list_certificates(self) -> ActionResult:
         certs = []
         statuses = self._get_param("CertificateStatuses")
-        for cert_bundle in self.acm_backend.list_certificates(statuses):
-            certs.append(cert_bundle.describe()["Certificate"])
+        includes = self._get_param("Includes")
+        for cert_bundle in self.acm_backend.list_certificates(statuses, includes):
+            _cert = cert_bundle.describe()["Certificate"]
+            _in_use_by = _cert.pop("InUseBy", [])
+            _cert["InUse"] = bool(_in_use_by)
+            _cert["Exported"] = cert_bundle.cert_options["Export"] == "ENABLED"
+            certs.append(_cert)
 
         result = {"CertificateSummaryList": certs}
-        return json.dumps(result)
+        return ActionResult(result=result)
 
-    def list_tags_for_certificate(self) -> GENERIC_RESPONSE_TYPE:
+    def list_tags_for_certificate(self) -> ActionResult:
         arn = self._get_param("CertificateArn")
 
         if arn is None:
             msg = "A required parameter for the specified action is not supplied."
-            return json.dumps({"__type": "MissingParameter", "message": msg}), dict(
-                status=400
-            )
+            raise AWSValidationException(msg)
 
         cert_bundle = self.acm_backend.get_certificate(arn)
 
-        result: Dict[str, List[Dict[str, str]]] = {"Tags": []}
+        result: dict[str, list[dict[str, str]]] = {"Tags": []}
         # Tag "objects" can not contain the Value part
         for key, value in cert_bundle.tags.items():
             tag_dict = {"Key": key}
@@ -154,49 +141,47 @@ class AWSCertificateManagerResponse(BaseResponse):
                 tag_dict["Value"] = value
             result["Tags"].append(tag_dict)
 
-        return json.dumps(result)
+        return ActionResult(result=result)
 
-    def remove_tags_from_certificate(self) -> GENERIC_RESPONSE_TYPE:
+    def remove_tags_from_certificate(self) -> ActionResult:
         arn = self._get_param("CertificateArn")
         tags = self._get_param("Tags")
 
         if arn is None:
             msg = "A required parameter for the specified action is not supplied."
-            return (
-                json.dumps({"__type": "MissingParameter", "message": msg}),
-                dict(status=400),
-            )
+            raise AWSValidationException(msg)
 
         self.acm_backend.remove_tags_from_certificate(arn, tags)
 
-        return ""
+        return EmptyResult()
 
-    def request_certificate(self) -> GENERIC_RESPONSE_TYPE:
+    def request_certificate(self) -> ActionResult:
         domain_name = self._get_param("DomainName")
         idempotency_token = self._get_param("IdempotencyToken")
         subject_alt_names = self._get_param("SubjectAlternativeNames")
         tags = self._get_param("Tags")  # Optional
+        cert_authority_arn = self._get_param("CertificateAuthorityArn")  # Optional
+        cert_options = self._get_param("Options")
 
         if subject_alt_names is not None and len(subject_alt_names) > 10:
             # There is initial AWS limit of 10
             msg = (
                 "An ACM limit has been exceeded. Need to request SAN limit to be raised"
             )
-            return (
-                json.dumps({"__type": "LimitExceededException", "message": msg}),
-                dict(status=400),
-            )
+            raise AWSError(msg, exception_type="LimitExceededException")
 
         arn = self.acm_backend.request_certificate(
             domain_name,
             idempotency_token,
             subject_alt_names,
             tags,
+            cert_authority_arn,
+            cert_options,
         )
 
-        return json.dumps({"CertificateArn": arn})
+        return ActionResult(result={"CertificateArn": arn})
 
-    def resend_validation_email(self) -> GENERIC_RESPONSE_TYPE:
+    def resend_validation_email(self) -> ActionResult:
         arn = self._get_param("CertificateArn")
         domain = self._get_param("Domain")
         # ValidationDomain not used yet.
@@ -207,30 +192,24 @@ class AWSCertificateManagerResponse(BaseResponse):
 
         if arn is None:
             msg = "A required parameter for the specified action is not supplied."
-            return (
-                json.dumps({"__type": "MissingParameter", "message": msg}),
-                dict(status=400),
-            )
+            raise AWSValidationException(msg)
 
         cert_bundle = self.acm_backend.get_certificate(arn)
 
         if cert_bundle.common_name != domain:
             msg = "Parameter Domain does not match certificate domain"
             _type = "InvalidDomainValidationOptionsException"
-            return json.dumps({"__type": _type, "message": msg}), dict(status=400)
+            raise AWSError(message=msg, exception_type=_type)
 
-        return ""
+        return EmptyResult()
 
-    def export_certificate(self) -> GENERIC_RESPONSE_TYPE:
+    def export_certificate(self) -> ActionResult:
         certificate_arn = self._get_param("CertificateArn")
         passphrase = self._get_param("Passphrase")
 
         if certificate_arn is None:
             msg = "A required parameter for the specified action is not supplied."
-            return (
-                json.dumps({"__type": "MissingParameter", "message": msg}),
-                dict(status=400),
-            )
+            raise AWSValidationException(msg)
 
         (
             certificate,
@@ -239,10 +218,37 @@ class AWSCertificateManagerResponse(BaseResponse):
         ) = self.acm_backend.export_certificate(
             certificate_arn=certificate_arn, passphrase=passphrase
         )
-        return json.dumps(
-            dict(
-                Certificate=certificate,
-                CertificateChain=certificate_chain,
-                PrivateKey=private_key,
-            )
+        return ActionResult(
+            result={
+                "Certificate": certificate,
+                "CertificateChain": certificate_chain,
+                "PrivateKey": private_key,
+            }
         )
+
+    def get_account_configuration(self) -> ActionResult:
+        config = self.acm_backend.get_account_configuration()
+        return ActionResult(result=config)
+
+    def put_account_configuration(self) -> ActionResult:
+        expiry_events = self._get_param("ExpiryEvents")
+        idempotency_token = self._get_param("IdempotencyToken")
+
+        if not idempotency_token:
+            raise AWSValidationException(
+                "1 validation error detected: Value null at 'idempotencyToken' failed to satisfy constraint: Member must not be null"
+            )
+
+        if not expiry_events:
+            raise AWSValidationException("Configuration for events is empty.")
+
+        days_before_expiry = expiry_events.get("DaysBeforeExpiry")
+        if days_before_expiry is None:
+            raise AWSValidationException(
+                "DaysBeforeExpiry is required in ExpiryEvents."
+            )
+
+        self.acm_backend.put_account_configuration(
+            days_before_expiry, idempotency_token
+        )
+        return EmptyResult()

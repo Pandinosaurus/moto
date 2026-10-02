@@ -3,7 +3,12 @@ import hashlib
 import hmac
 import re
 import string
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any
+
+from cryptography.hazmat.primitives.hashes import SHA1
+from cryptography.hazmat.primitives.twofactor import InvalidToken
+from cryptography.hazmat.primitives.twofactor.totp import TOTP
 
 from moto.moto_api._internal import mock_random as random
 
@@ -44,6 +49,12 @@ PAGINATION_MODEL = {
         "limit_default": 60,
         "unique_attribute": "group_name",
     },
+    "admin_list_groups_for_user": {
+        "input_token": "next_token",
+        "limit_key": "limit",
+        "limit_default": 60,
+        "unique_attribute": "group_name",
+    },
     "list_users_in_group": {
         "input_token": "next_token",
         "limit_key": "limit",
@@ -58,6 +69,8 @@ PAGINATION_MODEL = {
     },
 }
 
+TOTP_TIME_STEP: int = 30
+
 
 def create_id() -> str:
     size = 26
@@ -69,7 +82,7 @@ def check_secret_hash(
     app_client_secret: str,
     app_client_id: str,
     username: str,
-    secret_hash: Optional[str],
+    secret_hash: str | None,
 ) -> bool:
     key = bytes(str(app_client_secret).encode("latin-1"))
     msg = bytes(str(username + app_client_id).encode("latin-1"))
@@ -85,18 +98,18 @@ def validate_username_format(username: str, _format: str = "email") -> bool:
     return re.fullmatch(FORMATS.get(_format, r"a^"), username) is not None
 
 
-def flatten_attrs(attrs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def flatten_attrs(attrs: list[dict[str, Any]]) -> dict[str, Any]:
     return {attr["Name"]: attr["Value"] for attr in attrs}
 
 
-def expand_attrs(attrs: Dict[str, Any]) -> List[Dict[str, Any]]:
+def expand_attrs(attrs: dict[str, Any]) -> list[dict[str, Any]]:
     return [{"Name": k, "Value": v} for k, v in attrs.items()]
 
 
 ID_HASH_STRATEGY = "HASH"
 
 
-def generate_id(strategy: Optional[str], *args: Any) -> str:
+def generate_id(strategy: str | None, *args: Any) -> str:
     if strategy == ID_HASH_STRATEGY:
         return _generate_id_hash(args)
     else:
@@ -114,3 +127,35 @@ def _generate_id_hash(args: Any) -> str:
         hasher.update(str(arg).encode())
 
     return hasher.hexdigest()
+
+
+def cognito_totp(key: str) -> TOTP:
+    key_padded = key
+    # Pad the secret if required before converting it to bytes
+    padding = len(key) % 8
+    if padding != 0:
+        key_padded += "=" * (8 - padding)
+    # https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-settings-mfa-totp.html
+    return TOTP(
+        key=base64.b32decode(key_padded, casefold=True),
+        length=6,
+        algorithm=SHA1(),
+        time_step=TOTP_TIME_STEP,
+        enforce_key_length=False,
+    )
+
+
+def verify_totp(totp: TOTP, code: bytes, valid_window: int = 0) -> None:
+    time_now = int(time.time())
+    time_step = TOTP_TIME_STEP
+
+    for i in range(-valid_window, valid_window + 1):
+        time_to_check = time_now + (i * time_step)
+        try:
+            totp.verify(code, time_to_check)
+        except InvalidToken:
+            continue  # Check next time code.
+        else:
+            return  # Token is valid.
+
+    raise InvalidToken("Supplied TOTP value does not match.")

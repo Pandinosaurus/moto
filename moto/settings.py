@@ -2,7 +2,6 @@ import json
 import os
 import pathlib
 from functools import lru_cache
-from typing import List, Optional
 
 from moto.core.config import default_user_config
 
@@ -36,8 +35,13 @@ ENABLE_KEYPAIR_VALIDATION = bool(
 
 ENABLE_AMI_VALIDATION = bool(os.environ.get("MOTO_ENABLE_AMI_VALIDATION", False))
 
+MAX_FORM_MEMORY_SIZE = int(
+    os.environ.get("MOTO_MAX_FORM_MEMORY_SIZE", 1024 * 1024 * 50)
+)
 
 PRETTIFY_RESPONSES = bool(os.environ.get("MOTO_PRETTIFY_RESPONSES", False))
+
+DISABLE_GLOBAL_CORS = bool(os.environ.get("MOTO_DISABLE_GLOBAL_CORS", False))
 
 # Fully skip test that require docker
 SKIP_REQUIRES_DOCKER = bool(os.environ.get("TESTS_SKIP_REQUIRES_DOCKER", False))
@@ -54,7 +58,7 @@ def get_sf_execution_history_type() -> str:
     return os.environ.get("SF_EXECUTION_HISTORY_TYPE", "SUCCESS")
 
 
-def get_s3_custom_endpoints() -> List[str]:
+def get_s3_custom_endpoints() -> list[str]:
     endpoints = os.environ.get("MOTO_S3_CUSTOM_ENDPOINTS")
     if endpoints:
         return endpoints.split(",")
@@ -70,6 +74,10 @@ def get_s3_default_key_buffer_size() -> int:
             "MOTO_S3_DEFAULT_KEY_BUFFER_SIZE", S3_UPLOAD_PART_MIN_SIZE - 1024
         )
     )
+
+
+def get_s3_default_max_keys() -> int:
+    return int(os.environ.get("MOTO_S3_DEFAULT_MAX_KEYS", 1000))
 
 
 def s3_allow_crossdomain_access() -> bool:
@@ -109,7 +117,7 @@ def moto_proxy_port() -> str:
     return os.environ.get("MOTO_PROXY_PORT") or "5005"
 
 
-@lru_cache()
+@lru_cache
 def moto_server_host() -> str:
     if is_docker():
         return get_docker_host()
@@ -117,15 +125,15 @@ def moto_server_host() -> str:
         return "http://host.docker.internal"
 
 
-def moto_lambda_image() -> str:
-    return os.environ.get("MOTO_DOCKER_LAMBDA_IMAGE", "mlupin/docker-lambda")
+def moto_lambda_image() -> str | None:
+    return os.environ.get("MOTO_DOCKER_LAMBDA_IMAGE")
 
 
-def moto_network_name() -> Optional[str]:
+def moto_network_name() -> str | None:
     return os.environ.get("MOTO_DOCKER_NETWORK_NAME")
 
 
-def moto_network_mode() -> Optional[str]:
+def moto_network_mode() -> str | None:
     return os.environ.get("MOTO_DOCKER_NETWORK_MODE")
 
 
@@ -173,8 +181,19 @@ def get_docker_host() -> str:
         return "http://host.docker.internal"
 
 
-def get_cognito_idp_user_pool_id_strategy() -> Optional[str]:
+def get_cognito_idp_user_pool_id_strategy() -> str | None:
     return os.environ.get("MOTO_COGNITO_IDP_USER_POOL_ID_STRATEGY")
+
+
+def get_cognito_idp_user_pool_client_id_strategy() -> str | None:
+    return os.environ.get("MOTO_COGNITO_IDP_USER_POOL_CLIENT_ID_STRATEGY")
+
+
+def get_cognito_idp_user_pool_enable_totp() -> bool:
+    return (
+        os.environ.get("MOTO_COGNITO_IDP_USER_POOL_ENABLE_TOTP", "false").lower()
+        == "true"
+    )
 
 
 def enable_iso_regions() -> bool:
@@ -187,3 +206,11 @@ def load_iam_aws_managed_policies() -> bool:
         is True
         or os.environ.get("MOTO_IAM_LOAD_MANAGED_POLICIES", "").lower() == "true"
     )
+
+
+#
+# NOTE:  Recommend the next major release to set this to True for proper
+# default behavior
+#
+def iot_use_valid_cert() -> bool:
+    return default_user_config.get("iot", {}).get("use_valid_cert", False)

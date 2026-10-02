@@ -1,6 +1,7 @@
 """Handles incoming apigatewayv2 requests, invokes methods, returns responses."""
 
 import json
+from typing import Any
 from urllib.parse import unquote
 
 from moto.core.responses import TYPE_RESPONSE, BaseResponse
@@ -60,6 +61,15 @@ class ApiGatewayV2Response(BaseResponse):
         api_id = self.path.split("/")[-1]
         api = self.apigatewayv2_backend.get_api(api_id=api_id)
         return 200, {}, json.dumps(api.to_json())
+
+    @staticmethod
+    def get_api_without_id(*args: Any) -> TYPE_RESPONSE:  # type: ignore[misc]
+        """
+        AWS is returning an empty response when apiId is an empty string. This is slightly odd and it seems an
+        outlier, therefore it was decided we could have a custom handler for this particular use case instead of
+        trying to make it work with the existing url-matcher.
+        """
+        return 200, {}, "{}"
 
     def get_apis(self) -> TYPE_RESPONSE:
         apis = self.apigatewayv2_backend.get_apis()
@@ -616,7 +626,7 @@ class ApiGatewayV2Response(BaseResponse):
     def get_domain_names(self) -> TYPE_RESPONSE:
         domain_names = self.apigatewayv2_backend.get_domain_names()
         list_of_dict = [domain_name.to_json() for domain_name in domain_names]
-        return 200, {}, json.dumps(dict(items=list_of_dict))
+        return 200, {}, json.dumps({"items": list_of_dict})
 
     def create_api_mapping(self) -> TYPE_RESPONSE:
         domain_name = self.path.split("/")[-2]
@@ -645,7 +655,7 @@ class ApiGatewayV2Response(BaseResponse):
         domain_name = self.path.split("/")[-2]
         mappings = self.apigatewayv2_backend.get_api_mappings(domain_name=domain_name)
         list_of_dict = [mapping.to_json() for mapping in mappings]
-        return 200, {}, json.dumps(dict(items=list_of_dict))
+        return 200, {}, json.dumps({"items": list_of_dict})
 
     def delete_domain_name(self) -> TYPE_RESPONSE:
         domain_name = self.path.split("/")[-1]
@@ -671,13 +681,13 @@ class ApiGatewayV2Response(BaseResponse):
 
     def get_stage(self) -> TYPE_RESPONSE:
         api_id = self.path.split("/")[-3]
-        stage_name = self.path.split("/")[-1]
+        stage_name = unquote(self.path.split("/")[-1])
         stage = self.apigatewayv2_backend.get_stage(api_id, stage_name)
         return 200, {}, json.dumps(stage.to_json())
 
     def delete_stage(self) -> TYPE_RESPONSE:
         api_id = self.path.split("/")[-3]
-        stage_name = self.path.split("/")[-1]
+        stage_name = unquote(self.path.split("/")[-1])
         self.apigatewayv2_backend.delete_stage(api_id, stage_name)
         return 200, {}, "{}"
 

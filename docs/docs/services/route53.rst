@@ -73,30 +73,30 @@ route53
 - [X] list_health_checks
 - [X] list_hosted_zones
   
-        The parameters DelegationSetId and HostedZoneType are not yet implemented
-        
+The parameters DelegationSetId and HostedZoneType are not yet implemented
+
 
 - [X] list_hosted_zones_by_name
 - [X] list_hosted_zones_by_vpc
   
-        Pagination is not yet implemented
-        
+Pagination is not yet implemented
+
 
 - [X] list_query_logging_configs
   Return a list of query logging configs.
 
 - [X] list_resource_record_sets
   
-        The StartRecordIdentifier-parameter is not yet implemented
-        
+The StartRecordIdentifier-parameter is not yet implemented
+
 
 - [X] list_reusable_delegation_sets
   
-        Pagination is not yet implemented
-        
+Pagination is not yet implemented
+
 
 - [X] list_tags_for_resource
-- [ ] list_tags_for_resources
+- [X] list_tags_for_resources
 - [ ] list_traffic_policies
 - [ ] list_traffic_policy_instances
 - [ ] list_traffic_policy_instances_by_hosted_zone
@@ -106,6 +106,7 @@ route53
 - [ ] test_dns_answer
 - [X] update_health_check
 - [X] update_hosted_zone_comment
+- [ ] update_hosted_zone_features
 - [ ] update_traffic_policy_comment
 - [ ] update_traffic_policy_instance
 

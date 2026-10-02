@@ -1,6 +1,8 @@
 import json
+from uuid import uuid4
 
 from moto.core.responses import BaseResponse
+from moto.core.utils import unix_time
 
 from .models import SSOAdminBackend, ssoadmin_backends
 
@@ -70,7 +72,7 @@ class SSOAdminResponse(BaseResponse):
             max_results=max_results,
         )
 
-        return json.dumps(dict(AccountAssignments=assignments, NextToken=next_token))
+        return json.dumps({"AccountAssignments": assignments, "NextToken": next_token})
 
     def list_account_assignments_for_principal(self) -> str:
         filter_ = self._get_param("Filter", {})
@@ -92,7 +94,7 @@ class SSOAdminResponse(BaseResponse):
             principal_type=principal_type,
         )
 
-        return json.dumps(dict(AccountAssignments=assignments, NextToken=next_token))
+        return json.dumps({"AccountAssignments": assignments, "NextToken": next_token})
 
     def create_permission_set(self) -> str:
         name = self._get_param("Name")
@@ -159,9 +161,7 @@ class SSOAdminResponse(BaseResponse):
         permission_set_ids = []
         for permission_set in permission_sets:
             permission_set_ids.append(permission_set.permission_set_arn)
-        response = {"PermissionSets": permission_set_ids}
-        if next_token:
-            response["NextToken"] = next_token
+        response = {"PermissionSets": permission_set_ids, "NextToken": next_token}
         return json.dumps(response)
 
     def put_inline_policy_to_permission_set(self) -> str:
@@ -309,7 +309,7 @@ class SSOAdminResponse(BaseResponse):
         )
         account_assignment_creation_status["Status"] = "SUCCEEDED"
         return json.dumps(
-            dict(AccountAssignmentCreationStatus=account_assignment_creation_status)
+            {"AccountAssignmentCreationStatus": account_assignment_creation_status}
         )
 
     def describe_account_assignment_deletion_status(self) -> str:
@@ -323,5 +323,60 @@ class SSOAdminResponse(BaseResponse):
         )
         account_assignment_deletion_status["Status"] = "SUCCEEDED"
         return json.dumps(
-            dict(AccountAssignmentDeletionStatus=account_assignment_deletion_status)
+            {"AccountAssignmentDeletionStatus": account_assignment_deletion_status}
         )
+
+    def list_instances(self) -> str:
+        instances = self.ssoadmin_backend.list_instances()
+
+        return json.dumps({"Instances": [i.to_json() for i in instances]})
+
+    def update_instance(self) -> str:
+        instance_arn = self._get_param("InstanceArn")
+        name = self._get_param("Name")
+
+        self.ssoadmin_backend.update_instance(instance_arn=instance_arn, name=name)
+
+        return "{}"
+
+    def provision_permission_set(self) -> str:
+        instance_arn = self._get_param("InstanceArn")
+        permission_set_arn = self._get_param("PermissionSetArn")
+
+        self.ssoadmin_backend.provision_permission_set(
+            instance_arn=instance_arn,
+            permission_set_arn=permission_set_arn,
+        )
+        return json.dumps(
+            {
+                "PermissionSetProvisioningStatus": {
+                    "AccountId": self.current_account,
+                    "CreatedDate": unix_time(),
+                    "PermissionSetArn": permission_set_arn,
+                    "RequestId": str(uuid4()),
+                    "Status": "SUCCEEDED",
+                }
+            }
+        )
+
+    def list_permission_sets_provisioned_to_account(self) -> str:
+        instance_arn = self._get_param("InstanceArn")
+
+        permission_sets = (
+            self.ssoadmin_backend.list_permission_sets_provisioned_to_account(
+                instance_arn
+            )
+        )
+        arns = [p.permission_set_arn for p in permission_sets]
+        return json.dumps({"PermissionSets": arns})
+
+    def list_accounts_for_provisioned_permission_set(self) -> str:
+        instance_arn = self._get_param("InstanceArn")
+        permission_set_arn = self._get_param("PermissionSetArn")
+
+        account_ids = (
+            self.ssoadmin_backend.list_accounts_for_provisioned_permission_set(
+                instance_arn=instance_arn, permission_set_arn=permission_set_arn
+            )
+        )
+        return json.dumps({"AccountIds": account_ids})

@@ -1,14 +1,17 @@
 import base64
 import binascii
 import hashlib
+import json
 import logging
 import re
 import sys
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from collections.abc import Iterator
+from typing import Any
 from urllib.parse import urlparse
 
 from requests.structures import CaseInsensitiveDict
 
+from moto.core.compat import HAS_CRT
 from moto.settings import S3_IGNORE_SUBDOMAIN_BUCKETNAME
 
 log = logging.getLogger(__name__)
@@ -25,6 +28,7 @@ user_settable_fields = {
     "content-disposition",
     "x-robots-tag",
     "x-amz-checksum-algorithm",
+    "x-amz-checksum-type",
     "x-amz-content-sha256",
     "x-amz-content-crc32",
     "x-amz-content-crc32c",
@@ -34,7 +38,6 @@ user_settable_fields = {
 ARCHIVE_STORAGE_CLASSES = [
     "GLACIER",
     "DEEP_ARCHIVE",
-    "GLACIER_IR",
 ]
 STORAGE_CLASS = [
     "STANDARD",
@@ -42,11 +45,13 @@ STORAGE_CLASS = [
     "STANDARD_IA",
     "ONEZONE_IA",
     "INTELLIGENT_TIERING",
+    "GLACIER_IR",
+    "EXPRESS_ONEZONE",
 ] + ARCHIVE_STORAGE_CLASSES
 LOGGING_SERVICE_PRINCIPAL = "logging.s3.amazonaws.com"
 
 
-def bucket_name_from_url(url: str) -> Optional[str]:  # type: ignore
+def bucket_name_from_url(url: str) -> str | None:  # type: ignore
     if S3_IGNORE_SUBDOMAIN_BUCKETNAME:
         return None
     domain = urlparse(url).netloc
@@ -67,7 +72,7 @@ def bucket_name_from_url(url: str) -> Optional[str]:  # type: ignore
 
 
 # 'owi-common-cf', 'snippets/test.json' = bucket_and_name_from_url('s3://owi-common-cf/snippets/test.json')
-def bucket_and_name_from_url(url: str) -> Union[Tuple[str, str], Tuple[None, None]]:
+def bucket_and_name_from_url(url: str) -> tuple[str, str] | tuple[None, None]:
     prefix = "s3://"
     if url.startswith(prefix):
         bucket_name = url[len(prefix) : url.index("/", len(prefix))]
@@ -78,8 +83,8 @@ def bucket_and_name_from_url(url: str) -> Union[Tuple[str, str], Tuple[None, Non
 
 
 REGION_URL_REGEX = re.compile(
-    r"^https?://(s3[-\.](?P<region1>.+)\.amazonaws\.com/(.+)|"
-    r"(.+)\.s3[-\.](?P<region2>.+)\.amazonaws\.com)/?"
+    r"^https?://(s3[-\.](?:(?:dualstack|fips)[.\-])?(?P<region1>.+)\.amazonaws\.com/(.+)|"
+    r"(.+)\.s3[-\.](?:(?:dualstack|fips)[.\-])?(?P<region2>.+)\.amazonaws\.com)/?"
 )
 
 
@@ -92,7 +97,7 @@ def parse_region_from_url(url: str, use_default_region: bool = True) -> str:
     return region
 
 
-def metadata_from_headers(headers: Dict[str, Any]) -> CaseInsensitiveDict:  # type: ignore
+def metadata_from_headers(headers: dict[str, Any]) -> CaseInsensitiveDict:  # type: ignore
     metadata = CaseInsensitiveDict()  # type: ignore
     meta_regex = re.compile(r"^x-amz-meta-([a-zA-Z0-9\-_.]+)$", flags=re.IGNORECASE)
     for header in headers.keys():
@@ -119,7 +124,7 @@ class _VersionedKeyStore(dict):  # type: ignore
     https://github.com/django/django/blob/70576740b0bb5289873f5a9a9a4e1a26b2c330e5/django/utils/datastructures.py#L282
     """
 
-    def __sgetitem__(self, key: str) -> List[Any]:
+    def __sgetitem__(self, key: str) -> list[Any]:
         return super().__getitem__(key)
 
     def pop(self, key: str) -> None:  # type: ignore
@@ -167,7 +172,7 @@ class _VersionedKeyStore(dict):  # type: ignore
 
         super().__setitem__(key, list_)
 
-    def _iteritems(self) -> Iterator[Tuple[str, Any]]:
+    def _iteritems(self) -> Iterator[tuple[str, Any]]:
         for key in self._self_iterable():
             yield key, self[key]
 
@@ -175,7 +180,7 @@ class _VersionedKeyStore(dict):  # type: ignore
         for key in self._self_iterable():
             yield self[key]
 
-    def _iterlists(self) -> Iterator[Tuple[str, List[Any]]]:
+    def _iterlists(self) -> Iterator[tuple[str, list[Any]]]:
         for key in self._self_iterable():
             yield key, self.getlist(key)
 
@@ -185,7 +190,7 @@ class _VersionedKeyStore(dict):  # type: ignore
             size += sys.getsizeof(val)
         return size
 
-    def _self_iterable(self) -> Dict[str, Any]:
+    def _self_iterable(self) -> dict[str, Any]:
         # to enable concurrency, return a copy, to avoid "dictionary changed size during iteration"
         # TODO: look into replacing with a locking mechanism, potentially
         return dict(self)
@@ -208,6 +213,14 @@ def compute_checksum(body: bytes, algorithm: str, encode_base64: bool = True) ->
             hashed_body = binascii.crc32(body).to_bytes(4, "big")
     elif algorithm == "CRC32":
         hashed_body = binascii.crc32(body).to_bytes(4, "big")
+    elif algorithm == "CRC64NVME":
+        if HAS_CRT:
+            from awscrt import checksums
+
+            hashed_body = checksums.crc64nvme(body).to_bytes(8, "big")
+        else:
+            # Optional library Can't be found - just revert to CRC32
+            hashed_body = binascii.crc32(body).to_bytes(4, "big")
     else:
         hashed_body = _hash(hashlib.sha256, (body,))
     if encode_base64:
@@ -217,14 +230,10 @@ def compute_checksum(body: bytes, algorithm: str, encode_base64: bool = True) ->
 
 
 def _hash(fn: Any, args: Any) -> bytes:
-    try:
-        return fn(*args, usedforsecurity=False).digest()
-    except TypeError:
-        # The usedforsecurity-parameter is only available as of Python 3.9
-        return fn(*args).digest()
+    return fn(*args, usedforsecurity=False).digest()
 
 
-def cors_matches_origin(origin_header: str, allowed_origins: List[str]) -> bool:
+def cors_matches_origin(origin_header: str, allowed_origins: list[str]) -> bool:
     if "*" in allowed_origins:
         return True
     if origin_header in allowed_origins:
@@ -232,4 +241,39 @@ def cors_matches_origin(origin_header: str, allowed_origins: List[str]) -> bool:
     for allowed in allowed_origins:
         if re.match(allowed.replace(".", "\\.").replace("*", ".*"), origin_header):
             return True
+    return False
+
+
+def bucket_policy_is_public(policy: bytes | str) -> bool:
+    """Determine whether a bucket policy makes the bucket public.
+
+    Mirrors the essence of AWS's public policy evaluation: a policy is public
+    if any statement allows access to a wildcard principal without narrowing
+    it down through a Condition block. Statements that carry any Condition are
+    treated as non-public, which matches how AWS treats condition keys that
+    restrict access (the full AWS evaluation of which condition keys still
+    count as public is intentionally out of scope here).
+    """
+    try:
+        parsed = json.loads(policy)
+    except (ValueError, TypeError):
+        return False
+
+    statements = parsed.get("Statement") or []
+    if isinstance(statements, dict):
+        statements = [statements]
+    for statement in statements:
+        if statement.get("Effect") != "Allow":
+            continue
+        if "Condition" in statement:
+            continue
+        principal = statement.get("Principal")
+        if principal == "*":
+            return True
+        if isinstance(principal, dict):
+            aws_principal = principal.get("AWS")
+            if aws_principal == "*":
+                return True
+            if isinstance(aws_principal, list) and "*" in aws_principal:
+                return True
     return False

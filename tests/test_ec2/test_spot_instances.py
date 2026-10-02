@@ -1,14 +1,16 @@
 import datetime
-from unittest import SkipTest
 from uuid import uuid4
 
 import boto3
 import pytest
 from botocore.exceptions import ClientError
 
-from moto import mock_aws, settings
+from moto import mock_aws
+from moto.core.types import Base64EncodedString
 from moto.core.utils import iso_8601_datetime_with_milliseconds
 from tests import EXAMPLE_AMI_ID
+
+from .helpers import assert_dryrun_error
 
 
 @mock_aws
@@ -43,7 +45,7 @@ def test_request_spot_instances():
                 "ImageId": EXAMPLE_AMI_ID,
                 "KeyName": "test",
                 "SecurityGroups": [sec_name_1, sec_name_2],
-                "UserData": "some test data",
+                "UserData": str(Base64EncodedString.from_raw_string("some test data")),
                 "InstanceType": "m1.small",
                 "Placement": {"AvailabilityZone": "us-east-1c"},
                 "KernelId": "test-kernel",
@@ -53,12 +55,7 @@ def test_request_spot_instances():
             },
             DryRun=True,
         )
-    assert ex.value.response["Error"]["Code"] == "DryRunOperation"
-    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 412
-    assert (
-        ex.value.response["Error"]["Message"]
-        == "An error occurred (DryRunOperation) when calling the RequestSpotInstances operation: Request would have succeeded, but DryRun flag is set"
-    )
+    assert_dryrun_error(ex)
 
     request = conn.request_spot_instances(
         SpotPrice="0.5",
@@ -72,7 +69,7 @@ def test_request_spot_instances():
             "ImageId": EXAMPLE_AMI_ID,
             "KeyName": "test",
             "SecurityGroups": [sec_name_1, sec_name_2],
-            "UserData": "some test data",
+            "UserData": str(Base64EncodedString.from_raw_string("some test data")),
             "InstanceType": "m1.small",
             "Placement": {"AvailabilityZone": "us-east-1c"},
             "KernelId": "test-kernel",
@@ -100,7 +97,7 @@ def test_request_spot_instances():
     security_group_names = [
         group["GroupName"] for group in launch_spec["SecurityGroups"]
     ]
-    assert set(security_group_names) == set([sec_name_1, sec_name_2])
+    assert set(security_group_names) == {sec_name_1, sec_name_2}
 
     assert launch_spec["ImageId"] == EXAMPLE_AMI_ID
     assert launch_spec["KeyName"] == "test"
@@ -175,12 +172,7 @@ def test_cancel_spot_instance_request():
         client.cancel_spot_instance_requests(
             SpotInstanceRequestIds=[request["SpotInstanceRequestId"]], DryRun=True
         )
-    assert ex.value.response["Error"]["Code"] == "DryRunOperation"
-    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 412
-    assert (
-        ex.value.response["Error"]["Message"]
-        == "An error occurred (DryRunOperation) when calling the CancelSpotInstanceRequests operation: Request would have succeeded, but DryRun flag is set"
-    )
+    assert_dryrun_error(ex)
 
     client.cancel_spot_instance_requests(
         SpotInstanceRequestIds=[request["SpotInstanceRequestId"]]
@@ -298,11 +290,8 @@ def test_get_all_spot_instance_requests_filtering():
 
 @mock_aws
 @pytest.mark.filterwarnings("ignore")
+@pytest.mark.requires_clean_slate
 def test_request_spot_instances_instance_lifecycle():
-    if settings.TEST_SERVER_MODE:
-        # Currently no easy way to check which instance was created by request_spot_instance
-        # And we can't just pick the first instance in ServerMode and expect it to be the right one
-        raise SkipTest("ServerMode is not guaranteed to be empty")
     client = boto3.client("ec2", region_name="us-east-1")
     client.request_spot_instances(SpotPrice="0.5")
 

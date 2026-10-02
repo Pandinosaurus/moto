@@ -1,14 +1,23 @@
+from __future__ import annotations
+
 import datetime
 import inspect
 import re
-from gzip import decompress
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+from functools import cache
+from gzip import compress, decompress
+from typing import Any
 from urllib.parse import ParseResult, urlparse
 
 from botocore.exceptions import ClientError
+from botocore.session import Session
+
+from moto.core.model import ServiceModel
 
 from ..settings import get_s3_custom_endpoints
 from .common_types import TYPE_RESPONSE
+from .constants import MISSING
+from .loaders import create_loader
 from .versions import PYTHON_311
 
 
@@ -64,7 +73,7 @@ def camelcase_to_pascal(argument: str) -> str:
     return argument[0].upper() + argument[1:]
 
 
-def method_names_from_class(clazz: object) -> List[str]:
+def method_names_from_class(clazz: object) -> list[str]:
     predicate = inspect.isfunction
     return [x[0] for x in inspect.getmembers(clazz, predicate=predicate)]
 
@@ -75,6 +84,9 @@ def convert_regex_to_flask_path(url_path: str) -> str:
     """
     for token in ["$"]:
         url_path = url_path.replace(token, "")
+
+    if url_path == "/.*":
+        url_path = "/<path:route>"
 
     def caller(reg: Any) -> str:
         match_name, match_pattern = reg.groups()
@@ -88,7 +100,7 @@ def convert_regex_to_flask_path(url_path: str) -> str:
     return url_path
 
 
-class convert_to_flask_response(object):
+class convert_to_flask_response:
     def __init__(self, callback: Callable[..., Any]):
         self.callback = callback
 
@@ -124,7 +136,7 @@ class convert_to_flask_response(object):
         return response
 
 
-class convert_flask_to_responses_response(object):
+class convert_flask_to_responses_response:
     def __init__(self, callback: Callable[..., Any]):
         self.callback = callback
 
@@ -149,7 +161,7 @@ class convert_flask_to_responses_response(object):
 
 
 def iso_8601_datetime_with_milliseconds(
-    value: Optional[datetime.datetime] = None,
+    value: datetime.datetime | None = None,
 ) -> str:
     date_to_use = value or utcnow()
     return date_to_use.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -166,9 +178,17 @@ def iso_8601_datetime_without_milliseconds(value: datetime.datetime) -> str:
 
 def iso_8601_datetime_without_milliseconds_s3(
     value: datetime.datetime,
-) -> Optional[str]:
+) -> str | None:
     return value.strftime("%Y-%m-%dT%H:%M:%S.000Z") if value else None
 
+
+RFC3339_DATETIME_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}"  # YYYY-MM-DD
+    r"[Tt]"  # 'T' or 't' separator
+    r"\d{2}:\d{2}:\d{2}"  # HH:MM:SS
+    r"(?:\.\d+)?"  # Optional fractional seconds (e.g., .123)
+    r"(?:[Zz]|(?:\+|-)\d{2}:\d{2})$"  # 'Z' or 'z' for UTC, or +/-HH:MM offset
+)
 
 RFC1123 = "%a, %d %b %Y %H:%M:%S GMT"
 EN_WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -207,14 +227,14 @@ def str_to_rfc_1123_datetime(value: str) -> datetime.datetime:
     return datetime.datetime.strptime(value, RFC1123)
 
 
-def unix_time(dt: Optional[datetime.datetime] = None) -> float:
+def unix_time(dt: datetime.datetime | None = None) -> float:
     dt = dt or utcnow()
     epoch = utcfromtimestamp(0)
     delta = dt - epoch
     return (delta.days * 86400) + (delta.seconds + (delta.microseconds / 1e6))
 
 
-def unix_time_millis(dt: Optional[datetime.datetime] = None) -> float:
+def unix_time_millis(dt: datetime.datetime | None = None) -> float:
     return unix_time(dt) * 1000.0
 
 
@@ -261,28 +281,9 @@ def path_url(url: str) -> str:
     return path
 
 
-def tags_from_query_string(
-    querystring_dict: Dict[str, Any],
-    prefix: str = "Tag",
-    key_suffix: str = "Key",
-    value_suffix: str = "Value",
-) -> Dict[str, str]:
-    response_values = {}
-    for key in querystring_dict.keys():
-        if key.startswith(prefix) and key.endswith(key_suffix):
-            tag_index = key.replace(prefix + ".", "").replace("." + key_suffix, "")
-            tag_key = querystring_dict[f"{prefix}.{tag_index}.{key_suffix}"][0]
-            tag_value_key = f"{prefix}.{tag_index}.{value_suffix}"
-            if tag_value_key in querystring_dict:
-                response_values[tag_key] = querystring_dict[tag_value_key][0]
-            else:
-                response_values[tag_key] = None
-    return response_values
-
-
 def tags_from_cloudformation_tags_list(
-    tags_list: List[Dict[str, str]],
-) -> Dict[str, str]:
+    tags_list: list[dict[str, str]],
+) -> dict[str, str]:
     """Return tags in dict form from cloudformation resource tags form (list of dicts)"""
     tags = {}
     for entry in tags_list:
@@ -291,6 +292,19 @@ def tags_from_cloudformation_tags_list(
         tags[key] = value
 
     return tags
+
+
+def ensure_boolean(val: Any) -> bool:
+    """Ensures a boolean value if a string or boolean is provided
+
+    For strings, the value for True/False is case-insensitive.
+    """
+    if isinstance(val, bool):
+        return val
+    elif isinstance(val, str):
+        return val.lower() == "true"
+    else:
+        return False
 
 
 def remap_nested_keys(root: Any, key_transform: Callable[[str], str]) -> Any:
@@ -321,28 +335,36 @@ def remap_nested_keys(root: Any, key_transform: Callable[[str], str]) -> Any:
 
 
 def merge_dicts(
-    dict1: Dict[str, Any], dict2: Dict[str, Any], remove_nulls: bool = False
+    dict1: dict[str, Any], dict2: dict[str, Any], remove_nulls: bool = False
 ) -> None:
     """Given two arbitrarily nested dictionaries, merge the second dict into the first.
 
     :param dict dict1: the dictionary to be updated.
     :param dict dict2: a dictionary of keys/values to be merged into dict1.
 
-    :param bool remove_nulls: If true, updated values equal to None or an empty dictionary
+    :param bool remove_nulls: If true, updated values equal to None
         will be removed from dict1.
     """
     for key in dict2:
         if isinstance(dict2[key], dict):
-            if key in dict1 and key in dict2:
+            if key in dict1 and isinstance(dict1[key], dict):
                 merge_dicts(dict1[key], dict2[key], remove_nulls)
             else:
                 dict1[key] = dict2[key]
-            if dict1[key] == {} and remove_nulls:
-                dict1.pop(key)
+                if isinstance(dict1[key], dict):
+                    remove_null_from_dict(dict1)
         else:
             dict1[key] = dict2[key]
             if dict1[key] is None and remove_nulls:
                 dict1.pop(key)
+
+
+def remove_null_from_dict(dct: dict[str, Any]) -> None:
+    for key in list(dct.keys()):
+        if dct[key] is None:
+            dct.pop(key)
+        elif isinstance(dct[key], dict):
+            remove_null_from_dict(dct[key])
 
 
 def aws_api_matches(pattern: str, string: Any) -> bool:
@@ -366,7 +388,7 @@ def aws_api_matches(pattern: str, string: Any) -> bool:
         return False
 
 
-def extract_region_from_aws_authorization(string: str) -> Optional[str]:
+def extract_region_from_aws_authorization(string: str) -> str | None:
     auth = string or ""
     region = re.sub(r".*Credential=[^/]+/[^/]+/([^/]+)/.*", r"\1", auth)
     if region == auth:
@@ -374,26 +396,27 @@ def extract_region_from_aws_authorization(string: str) -> Optional[str]:
     return region
 
 
-def params_sort_function(item: Tuple[str, Any]) -> Tuple[str, int, str]:
-    """
-    sort by <string-prefix>.member.<integer>.<string-postfix>:
-    in case there are more than 10 members, the default-string sort would lead to IndexError when parsing the content.
-
-    Note: currently considers only the first occurence of `member`, but there may be cases with nested members
-    """
-    key, _ = item
-
-    match = re.search(r"(.*?member)\.(\d+)(.*)", key)
-    if match:
-        return (match.group(1), int(match.group(2)), match.group(3))
-    return (key, 0, "")
-
-
 def gzip_decompress(body: bytes) -> bytes:
     return decompress(body)
 
 
-def get_equivalent_url_in_aws_domain(url: str) -> Tuple[ParseResult, bool]:
+def gzip_compress(body: bytes) -> bytes:
+    return compress(body)
+
+
+ISO_REGION_DOMAINS = {
+    "iso": "c2s.ic.gov",
+    "isob": "sc2s.sgov.gov",
+    "isoe": "cloud.adc-e.uk",
+    "isof": "csp.hci.ic.gov",
+}
+ALT_DOMAIN_SUFFIXES = list(ISO_REGION_DOMAINS.values()) + [
+    "amazonaws.com.cn",
+    "amazonaws.eu",
+]
+
+
+def get_equivalent_url_in_aws_domain(url: str) -> tuple[ParseResult, bool]:
     """Parses a URL and converts non-standard AWS endpoint hostnames (from ISO
     regions or custom S3 endpoints) to the equivalent standard AWS domain.
 
@@ -406,14 +429,7 @@ def get_equivalent_url_in_aws_domain(url: str) -> Tuple[ParseResult, bool]:
 
     # https://github.com/getmoto/moto/pull/6412
     # Support ISO regions
-    iso_region_domains = [
-        "amazonaws.com.cn",
-        "c2s.ic.gov",
-        "sc2s.sgov.gov",
-        "cloud.adc-e.uk",
-        "csp.hci.ic.gov",
-    ]
-    for domain in iso_region_domains:
+    for domain in ALT_DOMAIN_SUFFIXES:
         if host.endswith(domain):
             host = host.replace(domain, "amazonaws.com")
 
@@ -435,3 +451,80 @@ def get_equivalent_url_in_aws_domain(url: str) -> Tuple[ParseResult, bool]:
             fragment=parsed.fragment,
         )
         return (result, True)
+
+
+def _load_service_model(service_name: str, model_name: str) -> dict[str, Any]:
+    loader = create_loader()
+    model = loader.load_service_model(service_name, model_name)
+    return model
+
+
+@cache
+def get_pagination_model(service_name: str) -> dict[str, Any]:  # type: ignore[misc]
+    pagination_model = _load_service_model(service_name, "paginators-1")
+    return pagination_model["pagination"]
+
+
+@cache
+def get_service_model(service_name: str) -> ServiceModel:
+    model = _load_service_model(service_name, "service-2")
+    service_model = ServiceModel(model, service_name)
+    return service_model
+
+
+def get_value(obj: Any, key: int | str, default: Any = MISSING) -> Any:
+    """Helper for pulling a keyed value off various types of objects.
+
+    A key containing a dot (e.g. `parent.child`) will be treated as a
+    path to traverse to get to the desired value.
+    """
+    if not isinstance(key, int) and "." in key:
+        return _get_value_for_keys(obj, key.split("."), default)
+    return _get_value_for_key(obj, key, default)
+
+
+def _get_value_for_keys(obj: Any, keys: list[str], default: Any) -> Any:
+    if len(keys) == 1:
+        return _get_value_for_key(obj, keys[0], default)
+    return _get_value_for_keys(
+        _get_value_for_key(obj, keys[0], default), keys[1:], default
+    )
+
+
+def _get_value_for_key(obj: Any, key: int | str, default: Any) -> Any:
+    if not hasattr(obj, "__getitem__"):
+        return getattr(obj, str(key), default)
+
+    try:
+        return obj[key]
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return default
+
+
+def set_value(obj: Any, key: str, value: Any) -> None:
+    """Helper for adding a keyed value to various types of objects.
+
+    A key containing a dot (e.g. `parent.child`) will be treated as a
+    path to traverse to get to the desired value.
+    """
+    if "." in key:
+        key_path = key.split(".")
+        obj = get_value(obj, ".".join(key_path[:-1]))
+        key = key_path[-1]
+    _set_value_for_key(obj, key, value)
+
+
+def _set_value_for_key(obj: Any, key: str, value: Any) -> None:
+    try:
+        obj[key] = value
+    except (KeyError, IndexError, TypeError, AttributeError):
+        setattr(obj, key, value)
+
+
+@cache
+def service_name_from_moto_package_name(moto_package_name: str) -> str:
+    # Unfortunately, Moto replaces hyphens found in service names with an empty string,
+    # so we can't just do a simple reverse replacement.  We have to create a lookup
+    # table of all possible service names and their Moto counterparts.
+    lut = {name.replace("-", ""): name for name in Session().get_available_services()}
+    return lut.get(moto_package_name, moto_package_name)

@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Tuple, Union
+from typing import Any
 
 from moto.core.responses import BaseResponse
 
@@ -14,10 +14,10 @@ class AthenaResponse(BaseResponse):
     def athena_backend(self) -> AthenaBackend:
         return athena_backends[self.current_account][self.region]
 
-    def create_work_group(self) -> Union[Tuple[str, Dict[str, int]], str]:
+    def create_work_group(self) -> tuple[str, dict[str, int]] | str:
         name = self._get_param("Name")
         description = self._get_param("Description")
-        configuration = self._get_param("Configuration")
+        configuration = self._get_param("Configuration", {})
         tags = self._get_param("Tags")
         work_group = self.athena_backend.create_work_group(
             name, configuration, description, tags
@@ -41,7 +41,12 @@ class AthenaResponse(BaseResponse):
         name = self._get_param("WorkGroup")
         return json.dumps({"WorkGroup": self.athena_backend.get_work_group(name)})
 
-    def start_query_execution(self) -> Union[Tuple[str, Dict[str, int]], str]:
+    def delete_work_group(self) -> str:
+        name = self._get_param("WorkGroup")
+        self.athena_backend.delete_work_group(name)
+        return "{}"
+
+    def start_query_execution(self) -> tuple[str, dict[str, int]] | str:
         query = self._get_param("QueryString")
         context = self._get_param("QueryExecutionContext")
         config = self._get_param("ResultConfiguration")
@@ -71,20 +76,26 @@ class AthenaResponse(BaseResponse):
                 "Query": execution.query,
                 "StatementType": statement_type,
                 "ResultConfiguration": execution.config,
+                "ResultReuseConfiguration": {
+                    "ResultReuseByAgeConfiguration": {"Enabled": False}
+                },
                 "QueryExecutionContext": execution.context,
                 "Status": {
                     "State": execution.status,
                     "SubmissionDateTime": execution.start_time,
+                    "CompletionDateTime": execution.end_time,
                 },
                 "Statistics": {
                     "EngineExecutionTimeInMillis": 0,
                     "DataScannedInBytes": 0,
                     "TotalExecutionTimeInMillis": 0,
                     "QueryQueueTimeInMillis": 0,
+                    "ServicePreProcessingTimeInMillis": 0,
                     "QueryPlanningTimeInMillis": 0,
                     "ServiceProcessingTimeInMillis": 0,
+                    "ResultReuseInformation": {"ReusedPreviousResult": False},
                 },
-                "WorkGroup": execution.workgroup,
+                "WorkGroup": execution.workgroup.name if execution.workgroup else None,
             }
         }
         if execution.execution_parameters is not None:
@@ -93,27 +104,60 @@ class AthenaResponse(BaseResponse):
             )
         return json.dumps(result)
 
+    def create_capacity_reservation(self) -> tuple[str, dict[str, int]] | str:
+        name = self._get_param("Name")
+        target_dpus = self._get_param("TargetDpus")
+        tags = self._get_param("Tags")
+        self.athena_backend.create_capacity_reservation(name, target_dpus, tags)
+        return json.dumps({})
+
+    def get_capacity_reservation(self) -> str | tuple[str, dict[str, int]]:
+        name = self._get_param("Name")
+        capacity_reservation = self.athena_backend.get_capacity_reservation(name)
+        if not capacity_reservation:
+            return self.error("Capacity reservation does not exist", 400)
+        return json.dumps(
+            {
+                "CapacityReservation": {
+                    "Name": capacity_reservation.name,
+                    "TargetDpus": capacity_reservation.target_dpus,
+                    "Tags": capacity_reservation.tags,
+                }
+            }
+        )
+
+    def list_capacity_reservations(self) -> str:
+        capacity_reservations = self.athena_backend.list_capacity_reservations()
+        return json.dumps({"CapacityReservations": capacity_reservations})
+
+    def update_capacity_reservation(self) -> str:
+        name = self._get_param("Name")
+        target_dpus = self._get_param("TargetDpus")
+        self.athena_backend.update_capacity_reservation(name, target_dpus)
+        return "{}"
+
     def get_query_results(self) -> str:
         exec_id = self._get_param("QueryExecutionId")
         result = self.athena_backend.get_query_results(exec_id)
         return json.dumps(result.to_dict())
 
     def list_query_executions(self) -> str:
-        executions = self.athena_backend.list_query_executions()
-        return json.dumps({"QueryExecutionIds": [i for i in executions.keys()]})
+        workgroup = self._get_param("WorkGroup")
+        executions = self.athena_backend.list_query_executions(workgroup)
+        return json.dumps({"QueryExecutionIds": list(executions.keys())})
 
     def stop_query_execution(self) -> str:
         exec_id = self._get_param("QueryExecutionId")
         self.athena_backend.stop_query_execution(exec_id)
         return json.dumps({})
 
-    def error(self, msg: str, status: int) -> Tuple[str, Dict[str, int]]:
+    def error(self, msg: str, status: int) -> tuple[str, dict[str, int]]:
         return (
             json.dumps({"__type": "InvalidRequestException", "Message": msg}),
-            dict(status=status),
+            {"status": status},
         )
 
-    def create_named_query(self) -> Union[Tuple[str, Dict[str, int]], str]:
+    def create_named_query(self) -> tuple[str, dict[str, int]] | str:
         name = self._get_param("Name")
         description = self._get_param("Description")
         database = self._get_param("Database")
@@ -147,11 +191,60 @@ class AthenaResponse(BaseResponse):
             {"DataCatalogsSummary": self.athena_backend.list_data_catalogs()}
         )
 
+    def list_tags_for_resource(self) -> tuple[str, dict[str, int]] | str:
+        resource_arn = self._get_param("ResourceARN")
+        tags = self.athena_backend.list_tags_for_resource(resource_arn)
+        if not tags:
+            return self.error(f"Athena Resource, {resource_arn} Does Not Exist", 400)
+        return json.dumps(tags)
+
+    def tag_resource(self) -> str:
+        """Handler for tag_resource API call."""
+        resource_arn = self._get_param("ResourceARN")
+        tags = self._get_param("Tags", [])
+        tags = {tag["Key"]: tag["Value"] for tag in tags}
+        self.athena_backend.tag_resource(resource_arn, tags)
+        return json.dumps({})
+
+    def untag_resource(self) -> str:
+        """Handler for untag_resource API call."""
+        resource_arn = self._get_param("ResourceARN")
+        tag_keys = self._get_param("TagKeys", [])
+        self.athena_backend.untag_resource(resource_arn, tag_keys)
+        return json.dumps({})
+
     def get_data_catalog(self) -> str:
         name = self._get_param("Name")
         return json.dumps({"DataCatalog": self.athena_backend.get_data_catalog(name)})
 
-    def create_data_catalog(self) -> Union[Tuple[str, Dict[str, int]], str]:
+    def get_database(self) -> str:
+        catalog_name = self._get_param("CatalogName")
+        database_name = self._get_param("DatabaseName")
+        database = self.athena_backend.get_database(catalog_name, database_name)
+        return json.dumps({"Database": database})
+
+    def list_databases(self) -> str:
+        catalog_name = self._get_param("CatalogName")
+        max_results = self._get_param("MaxResults")
+        next_token = self._get_param("NextToken")
+        databases, new_next_token = self.athena_backend.list_databases(
+            catalog_name, max_results=max_results, next_token=next_token
+        )
+        result: dict[str, Any] = {
+            "DatabaseList": [
+                {
+                    "Name": db.name,
+                    "Description": db.description,
+                    "Parameters": db.parameters,
+                }
+                for db in databases
+            ]
+        }
+        if new_next_token:
+            result["NextToken"] = new_next_token
+        return json.dumps(result)
+
+    def create_data_catalog(self) -> tuple[str, dict[str, int]] | str:
         name = self._get_param("Name")
         catalog_type = self._get_param("Type")
         description = self._get_param("Description")
@@ -181,7 +274,7 @@ class AthenaResponse(BaseResponse):
         )
         return json.dumps({"NamedQueryIds": named_query_ids, "NextToken": next_token})
 
-    def create_prepared_statement(self) -> Union[str, Tuple[str, Dict[str, int]]]:
+    def create_prepared_statement(self) -> str | tuple[str, dict[str, int]]:
         statement_name = self._get_param("StatementName")
         work_group = self._get_param("WorkGroup")
         query_statement = self._get_param("QueryStatement")
@@ -194,7 +287,7 @@ class AthenaResponse(BaseResponse):
             query_statement=query_statement,
             description=description,
         )
-        return json.dumps(dict())
+        return json.dumps({})
 
     def get_prepared_statement(self) -> str:
         statement_name = self._get_param("StatementName")
@@ -211,6 +304,46 @@ class AthenaResponse(BaseResponse):
                     "WorkGroupName": ps.workgroup,  # type: ignore[union-attr]
                     "Description": ps.description,  # type: ignore[union-attr]
                     # "LastModifiedTime": ps.last_modified_time,  # type: ignore[union-attr]
+                }
+            }
+        )
+
+    def get_query_runtime_statistics(self) -> str | tuple[str, dict[str, int]]:
+        query_execution_id = self._get_param("QueryExecutionId")
+
+        ps = self.athena_backend.get_query_runtime_statistics(
+            query_execution_id=query_execution_id
+        )
+
+        if ps is None:
+            return self.error(f"QueryExecution {query_execution_id} was not found", 400)
+
+        return json.dumps(
+            {
+                "QueryRuntimeStatistics": {
+                    "OutputStage": {
+                        "ExecutionTime": 100,
+                        "InputBytes": 0,
+                        "InputRows": 0,
+                        "OutputBytes": 1,
+                        "OutputRows": 1,
+                        "StageId": 1,
+                        "State": ps.status,
+                    },
+                    "Rows": {
+                        "InputBytes": 0,
+                        "InputRows": 0,
+                        "OutputBytes": 2,
+                        "OutputRows": 2,
+                    },
+                    "Timeline": {
+                        "EngineExecutionTimeInMillis": 0,
+                        "QueryPlanningTimeInMillis": 0,
+                        "QueryQueueTimeInMillis": 0,
+                        "ServicePreProcessingTimeInMillis": 0,
+                        "ServiceProcessingTimeInMillis": 0,
+                        "TotalExecutionTimeInMillis": 0,
+                    },
                 }
             }
         )

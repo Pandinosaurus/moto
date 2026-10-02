@@ -1,6 +1,7 @@
 """Handles incoming route53resolver requests/responses."""
 
 import json
+from typing import Any
 
 from moto.core.exceptions import InvalidToken
 from moto.core.responses import BaseResponse
@@ -13,7 +14,7 @@ class Route53ResolverResponse(BaseResponse):
     """Handler for Route53Resolver requests and responses."""
 
     def __init__(self) -> None:
-        super().__init__(service_name="route53-resolver")
+        super().__init__(service_name="route53resolver")
 
     @property
     def route53resolver_backend(self) -> Route53ResolverBackend:
@@ -231,9 +232,7 @@ class Route53ResolverResponse(BaseResponse):
             resource_arn=resource_arn, next_token=next_token, max_results=max_results
         )
 
-        response = {"Tags": tags}
-        if next_token:
-            response["NextToken"] = next_token
+        response = {"Tags": tags, "NextToken": next_token}
         return json.dumps(response)
 
     def tag_resource(self) -> str:
@@ -283,3 +282,149 @@ class Route53ResolverResponse(BaseResponse):
             )
         )
         return json.dumps({"ResolverEndpoint": resolver_endpoint.description()})
+
+    def associate_resolver_query_log_config(self) -> str:
+        """Associate an Amazon VPC with a query logging configuration."""
+        resolver_query_log_config_id = self._get_param("ResolverQueryLogConfigId")
+        resource_id = self._get_param("ResourceId")
+
+        association = self.route53resolver_backend.associate_resolver_query_log_config(
+            resolver_query_log_config_id=resolver_query_log_config_id,
+            resource_id=resource_id,
+        )
+
+        return json.dumps(
+            {"ResolverQueryLogConfigAssociation": association.description()}
+        )
+
+    def create_resolver_query_log_config(self) -> str:
+        """Create a Resolver query logging configuration."""
+        name = self._get_param("Name")
+        destination_arn = self._get_param("DestinationArn")
+        creator_request_id = self._get_param("CreatorRequestId")
+        tags = self._get_param("Tags", [])
+        resolver_query_log_config = (
+            self.route53resolver_backend.create_resolver_query_log_config(
+                name=name,
+                destination_arn=destination_arn,
+                creator_request_id=creator_request_id,
+                tags=tags,
+            )
+        )
+        return json.dumps(
+            {"ResolverQueryLogConfig": resolver_query_log_config.description()}
+        )
+
+    def get_resolver_query_log_config(self) -> str:
+        """Get information about a specified Resolver query logging configuration."""
+        resolver_query_log_config_id = self._get_param("ResolverQueryLogConfigId")
+
+        resolver_query_log_config = (
+            self.route53resolver_backend.get_resolver_query_log_config(
+                resolver_query_log_config_id=resolver_query_log_config_id,
+            )
+        )
+
+        return json.dumps(
+            {"ResolverQueryLogConfig": resolver_query_log_config.description()}
+        )
+
+    def get_resolver_query_log_config_association(self) -> str:
+        resolver_query_log_config_association_id = self._get_param(
+            "ResolverQueryLogConfigAssociationId"
+        )
+
+        association = self.route53resolver_backend.get_resolver_query_log_config_association(
+            resolver_query_log_config_association_id=resolver_query_log_config_association_id,
+        )
+
+        return json.dumps(
+            {"ResolverQueryLogConfigAssociation": association.description()}
+        )
+
+    def list_resolver_query_log_configs(self) -> str:
+        """List all resolver query logging configurations."""
+        filters = self._get_param("Filters")
+        next_token = self._get_param("NextToken")
+        max_results = self._get_int_param("MaxResults")
+
+        configs, next_token = (
+            self.route53resolver_backend.list_resolver_query_log_configs(
+                filters, next_token=next_token, max_results=max_results
+            )
+        )
+
+        response: dict[str, Any] = {
+            "ResolverQueryLogConfigs": [x.description() for x in configs],
+            "TotalCount": len(configs),
+            "TotalFilteredCount": len(configs),
+        }
+        if next_token:
+            response["NextToken"] = next_token
+
+        return json.dumps(response)
+
+    def list_resolver_query_log_config_associations(self) -> str:
+        """List all associations between resolver query log configs and VPCs."""
+        filters = self._get_param("Filters")
+        next_token = self._get_param("NextToken")
+        max_results = self._get_int_param("MaxResults")
+
+        associations, next_token = (
+            self.route53resolver_backend.list_resolver_query_log_config_associations(
+                filters, next_token=next_token, max_results=max_results
+            )
+        )
+
+        response: dict[str, Any] = {
+            "ResolverQueryLogConfigAssociations": [
+                x.description() for x in associations
+            ],
+            "TotalCount": len(associations),
+            "TotalFilteredCount": len(associations),
+        }
+        if next_token:
+            response["NextToken"] = next_token
+
+        return json.dumps(response)
+
+    def update_resolver_dnssec_config(self) -> str:
+        """Update the DNSSEC validation status for the specified resource."""
+        resource_id = self._get_param("ResourceId")
+        validation = self._get_param("Validation")
+
+        dnssec_config = self.route53resolver_backend.update_resolver_dnssec_config(
+            resource_id=resource_id,
+            validation=validation,
+        )
+
+        return json.dumps({"ResolverDNSSECConfig": dnssec_config.description()})
+
+    def get_resolver_dnssec_config(self) -> str:
+        """Get information about a resolver DNSSEC config."""
+        resource_id = self._get_param("ResourceId")
+
+        dnssec_config = self.route53resolver_backend.get_resolver_dnssec_config(
+            resource_id=resource_id
+        )
+
+        return json.dumps({"ResolverDNSSECConfig": dnssec_config.description()})
+
+    def list_resolver_dnssec_configs(self) -> str:
+        """Returns list of all Resolver dnssec configs, filtered if specified."""
+        filters = self._get_param("Filters")
+        next_token = self._get_param("NextToken")
+        max_results = self._get_int_param("MaxResults")
+        dnssec_configs, next_token = (
+            self.route53resolver_backend.list_resolver_dnssec_configs(
+                filters, next_token=next_token, max_results=max_results
+            )
+        )
+        response = {
+            "ResolverDnssecConfigs": [x.description() for x in dnssec_configs],
+            "MaxResults": max_results,
+        }
+        if next_token:
+            response["NextToken"] = next_token
+
+        return json.dumps(response)

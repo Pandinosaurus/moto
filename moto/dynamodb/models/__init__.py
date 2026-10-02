@@ -1,12 +1,18 @@
 import copy
 import re
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from collections.abc import Iterator
+from typing import Any, Optional
 
 from moto.core.base_backend import BackendDict, BaseBackend
 from moto.core.exceptions import JsonRESTError
+from moto.core.resource_tagging import TaggableResourcesMixin, TaggedResource
 from moto.core.utils import unix_time
-from moto.dynamodb.comparisons import get_expected, get_filter_expression
+from moto.dynamodb.comparisons import (
+    create_condition_expression_parser,
+    get_expected,
+    get_filter_expression,
+)
 from moto.dynamodb.exceptions import (
     BackupNotFoundException,
     ConditionalCheckFailed,
@@ -15,6 +21,8 @@ from moto.dynamodb.exceptions import (
     ItemSizeToUpdateTooLarge,
     MockValidationException,
     MultipleTransactionsException,
+    PointInTimeRecoveryUnavailable,
+    PolicyNotFoundException,
     ResourceInUseException,
     ResourceNotFoundException,
     SourceTableNotFoundException,
@@ -29,10 +37,12 @@ from moto.dynamodb.models.dynamo_type import DynamoType, Item
 from moto.dynamodb.models.table import (
     Backup,
     GlobalSecondaryIndex,
+    ResourcePolicy,
     RestoredPITTable,
     RestoredTable,
     Table,
 )
+from moto.dynamodb.models.table_export import TableExport
 from moto.dynamodb.models.table_import import TableImport
 from moto.dynamodb.parsing import partiql
 from moto.dynamodb.parsing.executors import UpdateExpressionExecutor
@@ -40,17 +50,21 @@ from moto.dynamodb.parsing.expressions import UpdateExpressionParser  # type: ig
 from moto.dynamodb.parsing.validators import UpdateExpressionValidator
 
 
-class DynamoDBBackend(BaseBackend):
+class DynamoDBBackend(BaseBackend, TaggableResourcesMixin):
+    SERVICE_NAMESPACE = "dynamodb"
+
     def __init__(self, region_name: str, account_id: str):
         super().__init__(region_name, account_id)
-        self.tables: Dict[str, Table] = OrderedDict()
-        self.backups: Dict[str, Backup] = OrderedDict()
-        self.table_imports: Dict[str, TableImport] = {}
+        self.tables: dict[str, Table] = OrderedDict()
+        self.backups: dict[str, Backup] = OrderedDict()
+        self.table_imports: dict[str, TableImport] = {}
+        self.table_exports: dict[str, TableExport] = {}
+        self.resource_policies: dict[str, ResourcePolicy] = {}
 
     @staticmethod
     def default_vpc_endpoint_service(
-        service_region: str, zones: List[str]
-    ) -> List[Dict[str, str]]:
+        service_region: str, zones: list[str]
+    ) -> list[dict[str, str]]:
         """Default VPC endpoint service."""
         # No 'vpce' in the base endpoint DNS name
         return BaseBackend.default_vpc_endpoint_service_factory(
@@ -65,16 +79,17 @@ class DynamoDBBackend(BaseBackend):
     def create_table(
         self,
         name: str,
-        schema: List[Dict[str, str]],
-        throughput: Optional[Dict[str, int]],
-        attr: List[Dict[str, str]],
-        global_indexes: Optional[List[Dict[str, Any]]],
-        indexes: Optional[List[Dict[str, Any]]],
-        streams: Optional[Dict[str, Any]],
+        schema: list[dict[str, str]],
+        throughput: dict[str, int] | None,
+        attr: list[dict[str, str]],
+        global_indexes: list[dict[str, Any]] | None,
+        indexes: list[dict[str, Any]] | None,
+        streams: dict[str, Any] | None,
         billing_mode: str,
-        sse_specification: Optional[Dict[str, Any]],
-        tags: List[Dict[str, str]],
-        deletion_protection_enabled: bool,
+        sse_specification: dict[str, Any] | None,
+        tags: list[dict[str, str]],
+        deletion_protection_enabled: bool | None,
+        warm_throughput: dict[str, Any] | None,
     ) -> Table:
         if name in self.tables:
             raise ResourceInUseException(f"Table already exists: {name}")
@@ -92,20 +107,19 @@ class DynamoDBBackend(BaseBackend):
             sse_specification=sse_specification,
             tags=tags,
             deletion_protection_enabled=deletion_protection_enabled,
+            warm_throughput=warm_throughput,
         )
         self.tables[name] = table
         return table
 
     def delete_table(self, name: str) -> Table:
-        if name not in self.tables:
-            raise ResourceNotFoundException
-        table_for_deletion = self.tables.get(name)
+        table_for_deletion = self.get_table(name)
         if isinstance(table_for_deletion, Table):
             if table_for_deletion.deletion_protection_enabled:
                 raise DeletionProtectedException(name)
-        return self.tables.pop(name)
+        return self.tables.pop(table_for_deletion.name)
 
-    def describe_endpoints(self) -> List[Dict[str, Union[int, str]]]:
+    def describe_endpoints(self) -> list[dict[str, int | str]]:
         return [
             {
                 "Address": f"dynamodb.{self.region_name}.amazonaws.com",
@@ -113,19 +127,7 @@ class DynamoDBBackend(BaseBackend):
             }
         ]
 
-    def tag_resource(self, table_arn: str, tags: List[Dict[str, str]]) -> None:
-        for table in self.tables:
-            if self.tables[table].table_arn == table_arn:
-                self.tables[table].tags.extend(tags)
-
-    def untag_resource(self, table_arn: str, tag_keys: List[str]) -> None:
-        for table in self.tables:
-            if self.tables[table].table_arn == table_arn:
-                self.tables[table].tags = [
-                    tag for tag in self.tables[table].tags if tag["Key"] not in tag_keys
-                ]
-
-    def list_tags_of_resource(self, table_arn: str) -> List[Dict[str, str]]:
+    def list_tags_of_resource(self, table_arn: str) -> list[dict[str, str]]:
         for table in self.tables:
             if self.tables[table].table_arn == table_arn:
                 return self.tables[table].tags
@@ -133,8 +135,8 @@ class DynamoDBBackend(BaseBackend):
 
     def list_tables(
         self, limit: int, exclusive_start_table_name: str
-    ) -> Tuple[List[str], Optional[str]]:
-        all_tables: List[str] = list(self.tables.keys())
+    ) -> tuple[list[str], str | None]:
+        all_tables: list[str] = list(self.tables.keys())
 
         if exclusive_start_table_name:
             try:
@@ -155,73 +157,57 @@ class DynamoDBBackend(BaseBackend):
             return tables, tables[-1]
         return tables, None
 
-    def describe_table(self, name: str) -> Dict[str, Any]:
-        # We can't use get_table() here, because the error message is slightly different for this operation
-        if name not in self.tables:
+    def describe_table(self, name: str) -> dict[str, Any]:
+        # Error message is slightly different for this operation
+        try:
+            table = self.get_table(name)
+        except ResourceNotFoundException:
             raise ResourceNotFoundException(table_name=name)
-        return self.tables[name].describe(base_key="Table")
+        return table.describe(base_key="Table")
 
     def update_table(
         self,
         name: str,
-        attr_definitions: List[Dict[str, str]],
-        global_index: List[Dict[str, Any]],
-        throughput: Dict[str, Any],
+        attr_definitions: list[dict[str, str]],
+        global_index: list[dict[str, Any]],
+        throughput: dict[str, Any],
         billing_mode: str,
-        stream_spec: Dict[str, Any],
-        deletion_protection_enabled: bool,
+        stream_spec: dict[str, Any],
+        deletion_protection_enabled: bool | None,
+        warm_throughput: dict[str, Any] | None,
     ) -> Table:
         table = self.get_table(name)
         if attr_definitions:
             table.attr = attr_definitions
         if global_index:
-            table = self.update_table_global_indexes(name, global_index)
+            self.update_table_global_indexes(table, global_index)
         if throughput:
-            table = self.update_table_throughput(name, throughput)
+            table.throughput = throughput
         if billing_mode:
-            table = self.update_table_billing_mode(name, billing_mode)
+            table.billing_mode = billing_mode
         if stream_spec:
-            table = self.update_table_streams(name, stream_spec)
-        if deletion_protection_enabled:
-            table = self.update_table_deletion_protection_enabled(
-                name, deletion_protection_enabled
-            )
-        return table
-
-    def update_table_throughput(self, name: str, throughput: Dict[str, int]) -> Table:
-        table = self.tables[name]
-        table.throughput = throughput
-        return table
-
-    def update_table_billing_mode(self, name: str, billing_mode: str) -> Table:
-        table = self.tables[name]
-        table.billing_mode = billing_mode
-        return table
-
-    def update_table_deletion_protection_enabled(
-        self, name: str, deletion_protection_enabled: bool
-    ) -> Table:
-        table = self.tables[name]
-        table.deletion_protection_enabled = deletion_protection_enabled
+            self.update_table_streams(table, stream_spec)
+        if deletion_protection_enabled in {True, False}:
+            table.deletion_protection_enabled = deletion_protection_enabled
+        if warm_throughput:
+            table.warm_throughput = warm_throughput
+            table.warm_throughput["Status"] = "ACTIVE"
         return table
 
     def update_table_streams(
-        self, name: str, stream_specification: Dict[str, Any]
-    ) -> Table:
-        table = self.tables[name]
+        self, table: Table, stream_specification: dict[str, Any]
+    ) -> None:
         if (
             stream_specification.get("StreamEnabled")
             or stream_specification.get("StreamViewType")
         ) and table.latest_stream_label:
             raise StreamAlreadyEnabledException
         table.set_stream_specification(stream_specification)
-        return table
 
     def update_table_global_indexes(
-        self, name: str, global_index_updates: List[Dict[str, Any]]
-    ) -> Table:
-        table = self.tables[name]
-        gsis_by_name = dict((i.name, i) for i in table.global_indexes)
+        self, table: Table, global_index_updates: list[dict[str, Any]]
+    ) -> None:
+        gsis_by_name = {i.name: i for i in table.global_indexes}
         for gsi_update in global_index_updates:
             gsi_to_create = gsi_update.get("Create")
             gsi_to_update = gsi_update.get("Update")
@@ -231,8 +217,9 @@ class DynamoDBBackend(BaseBackend):
                 index_name = gsi_to_delete["IndexName"]
                 if index_name not in gsis_by_name:
                     raise ValueError(
-                        "Global Secondary Index does not exist, but tried to delete: %s"
-                        % gsi_to_delete["IndexName"]
+                        "Global Secondary Index does not exist, but tried to delete: {}".format(
+                            gsi_to_delete["IndexName"]
+                        )
                     )
 
                 del gsis_by_name[index_name]
@@ -241,16 +228,16 @@ class DynamoDBBackend(BaseBackend):
                 index_name = gsi_to_update["IndexName"]
                 if index_name not in gsis_by_name:
                     raise ValueError(
-                        "Global Secondary Index does not exist, but tried to update: %s"
-                        % index_name
+                        f"Global Secondary Index does not exist, but tried to update: {index_name}"
                     )
                 gsis_by_name[index_name].update(gsi_to_update)
 
             if gsi_to_create:
                 if gsi_to_create["IndexName"] in gsis_by_name:
                     raise ValueError(
-                        "Global Secondary Index already exists: %s"
-                        % gsi_to_create["IndexName"]
+                        "Global Secondary Index already exists: {}".format(
+                            gsi_to_create["IndexName"]
+                        )
                     )
 
                 gsis_by_name[gsi_to_create["IndexName"]] = GlobalSecondaryIndex.create(
@@ -258,18 +245,17 @@ class DynamoDBBackend(BaseBackend):
                 )
 
         table.global_indexes = list(gsis_by_name.values())
-        return table
 
     def put_item(
         self,
         table_name: str,
-        item_attrs: Dict[str, Any],
-        expected: Optional[Dict[str, Any]] = None,
-        condition_expression: Optional[str] = None,
-        expression_attribute_names: Optional[Dict[str, Any]] = None,
-        expression_attribute_values: Optional[Dict[str, Any]] = None,
+        item_attrs: dict[str, Any],
+        expected: dict[str, Any] | None = None,
+        condition_expression: str | None = None,
+        expression_attribute_names: dict[str, Any] | None = None,
+        expression_attribute_values: dict[str, Any] | None = None,
         overwrite: bool = False,
-        return_values_on_condition_check_failure: Optional[str] = None,
+        return_values_on_condition_check_failure: str | None = None,
     ) -> Item:
         table = self.get_table(table_name)
         return table.put_item(
@@ -283,8 +269,8 @@ class DynamoDBBackend(BaseBackend):
         )
 
     def get_table_keys_name(
-        self, table_name: str, keys: Dict[str, Any]
-    ) -> Tuple[Optional[str], Optional[str]]:
+        self, table_name: str, keys: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
         """
         Given a set of keys, extracts the key and range key
         """
@@ -306,8 +292,8 @@ class DynamoDBBackend(BaseBackend):
             return potential_hash, potential_range
 
     def get_keys_value(
-        self, table: Table, keys: Dict[str, Any]
-    ) -> Tuple[DynamoType, Optional[DynamoType]]:
+        self, table: Table, keys: dict[str, Any]
+    ) -> tuple[DynamoType, DynamoType | None]:
         if table.hash_key_attr not in keys or (
             table.has_range_key and table.range_key_attr not in keys
         ):
@@ -320,12 +306,12 @@ class DynamoDBBackend(BaseBackend):
         return hash_key, range_key
 
     def get_schema(
-        self, table_name: str, index_name: Optional[str]
-    ) -> List[Dict[str, Any]]:
+        self, table_name: str, index_name: str | None
+    ) -> list[dict[str, Any]]:
         table = self.get_table(table_name)
         if index_name:
             all_indexes = (table.global_indexes or []) + (table.indexes or [])
-            indexes_by_name = dict((i.name, i) for i in all_indexes)
+            indexes_by_name = {i.name: i for i in all_indexes}
             if index_name not in indexes_by_name:
                 all_index_names = ", ".join(indexes_by_name.keys())
                 raise ResourceNotFoundException(
@@ -337,16 +323,23 @@ class DynamoDBBackend(BaseBackend):
             return table.schema
 
     def get_table(self, table_name: str) -> Table:
-        if table_name not in self.tables:
-            raise ResourceNotFoundException()
-        return self.tables[table_name]
+        # Find table by name
+        if table := self.tables.get(table_name):
+            return table
+        # Find table by ARN
+        # List of tables might change during this operation, so we have to be defensive about this
+        table_names = list(self.tables.keys())
+        for name in table_names:
+            if (table := self.tables.get(name)) and table.table_arn == table_name:
+                return table
+        raise ResourceNotFoundException()
 
     def get_item(
         self,
         table_name: str,
-        keys: Dict[str, Any],
-        projection_expressions: Optional[List[List[str]]] = None,
-    ) -> Optional[Item]:
+        keys: dict[str, Any],
+        projection_expressions: list[list[str]] | None = None,
+    ) -> Item | None:
         table = self.get_table(table_name)
         hash_key, range_key = self.get_keys_value(table, keys)
         return table.get_item(hash_key, range_key, projection_expressions)
@@ -354,24 +347,37 @@ class DynamoDBBackend(BaseBackend):
     def query(
         self,
         table_name: str,
-        hash_key_dict: Dict[str, Any],
-        range_comparison: Optional[str],
-        range_value_dicts: List[Dict[str, Any]],
+        hash_key_dict: dict[str, Any] | None,
+        range_comparison: str | None,
+        range_value_dicts: list[dict[str, Any]],
         limit: int,
-        exclusive_start_key: Dict[str, Any],
+        exclusive_start_key: dict[str, Any],
         scan_index_forward: bool,
-        projection_expressions: Optional[List[List[str]]],
-        index_name: Optional[str] = None,
+        projection_expressions: list[list[str]] | None,
+        index_name: str | None = None,
         consistent_read: bool = False,
-        expr_names: Optional[Dict[str, str]] = None,
-        expr_values: Optional[Dict[str, Dict[str, str]]] = None,
-        filter_expression: Optional[str] = None,
+        expr_names: dict[str, str] | None = None,
+        expr_values: dict[str, dict[str, str]] | None = None,
+        filter_expression: str | None = None,
+        hash_key_conditions: list[tuple[str, dict[str, Any]]] | None = None,
+        range_key_conditions: Optional[
+            list[tuple[str, str, list[dict[str, Any]]]]
+        ] = None,
         **filter_kwargs: Any,
-    ) -> Tuple[List[Item], int, Optional[Dict[str, Any]]]:
+    ) -> tuple[list[Item], int, dict[str, Any] | None]:
         table = self.get_table(table_name)
 
-        hash_key = DynamoType(hash_key_dict)
+        hash_key = DynamoType(hash_key_dict) if hash_key_dict else None
         range_values = [DynamoType(range_value) for range_value in range_value_dicts]
+
+        # Convert key conditions to DynamoType
+        hash_key_conditions_typed = [
+            (name, DynamoType(value)) for name, value in (hash_key_conditions or [])
+        ]
+        range_key_conditions_typed = [
+            (name, comparison, [DynamoType(v) for v in values])
+            for name, comparison, values in (range_key_conditions or [])
+        ]
 
         filter_expression_op = get_filter_expression(
             filter_expression, expr_names, expr_values
@@ -388,25 +394,28 @@ class DynamoDBBackend(BaseBackend):
             index_name,
             consistent_read,
             filter_expression_op,
+            hash_key_conditions=hash_key_conditions_typed,
+            range_key_conditions=range_key_conditions_typed,
             **filter_kwargs,
         )
 
     def scan(
         self,
         table_name: str,
-        filters: Dict[str, Any],
+        filters: dict[str, Any],
         limit: int,
-        exclusive_start_key: Dict[str, Any],
-        filter_expression: Optional[str],
-        expr_names: Dict[str, Any],
-        expr_values: Dict[str, Any],
+        exclusive_start_key: dict[str, Any],
+        filter_expression: str | None,
+        expr_names: dict[str, Any],
+        expr_values: dict[str, Any],
         index_name: str,
         consistent_read: bool,
-        projection_expression: Optional[List[List[str]]],
-    ) -> Tuple[List[Item], int, Optional[Dict[str, Any]]]:
+        projection_expression: list[list[str]] | None,
+        segments: tuple[None, None] | tuple[int, int],
+    ) -> tuple[list[Item], int, dict[str, Any] | None]:
         table = self.get_table(table_name)
 
-        scan_filters: Dict[str, Any] = {}
+        scan_filters: dict[str, Any] = {}
         for key, (comparison_operator, comparison_values) in filters.items():
             dynamo_types = [DynamoType(value) for value in comparison_values]
             scan_filters[key] = (comparison_operator, dynamo_types)
@@ -423,19 +432,20 @@ class DynamoDBBackend(BaseBackend):
             index_name,
             consistent_read,
             projection_expression,
+            segments=segments,
         )
 
     def update_item(
         self,
         table_name: str,
-        key: Dict[str, Dict[str, Any]],
+        key: dict[str, dict[str, Any]],
         update_expression: str,
-        expression_attribute_names: Dict[str, Any],
-        expression_attribute_values: Dict[str, Any],
-        attribute_updates: Optional[Dict[str, Any]] = None,
-        expected: Optional[Dict[str, Any]] = None,
-        condition_expression: Optional[str] = None,
-        return_values_on_condition_check_failure: Optional[str] = None,
+        expression_attribute_names: dict[str, Any],
+        expression_attribute_values: dict[str, Any],
+        attribute_updates: dict[str, Any] | None = None,
+        expected: dict[str, Any] | None = None,
+        condition_expression: str | None = None,
+        return_values_on_condition_check_failure: str | None = None,
     ) -> Item:
         table = self.get_table(table_name)
 
@@ -445,7 +455,6 @@ class DynamoDBBackend(BaseBackend):
             # Parse expression to get validation errors
             update_expression_ast = UpdateExpressionParser.make(update_expression)
             update_expression = re.sub(r"\s*([=\+-])\s*", "\\1", update_expression)
-            update_expression_ast.validate()
 
         if all([table.hash_key_attr in key, table.range_key_attr in key]):
             # Covers cases where table has hash and range keys, ``key`` param
@@ -469,11 +478,12 @@ class DynamoDBBackend(BaseBackend):
 
         if not get_expected(expected).expr(item):
             raise ConditionalCheckFailed
-        condition_op = get_filter_expression(
+        condition_expression_parser = create_condition_expression_parser(
             condition_expression,
             expression_attribute_names,
             expression_attribute_values,
         )
+        condition_op = condition_expression_parser.parse()
         if not condition_op.expr(item):
             if (
                 return_values_on_condition_check_failure == "ALL_OLD"
@@ -495,7 +505,7 @@ class DynamoDBBackend(BaseBackend):
                     item=item,
                     table=table,
                 ).validate()
-            data: Dict[str, Any] = {
+            data: dict[str, Any] = {
                 table.hash_key_attr: {hash_value.type: hash_value.value}
             }
             if range_value:
@@ -510,6 +520,7 @@ class DynamoDBBackend(BaseBackend):
             item.validate_no_empty_key_values(attribute_updates, table.attribute_keys)  # type: ignore[union-attr]
 
         if update_expression:
+            # Validate the UpdateExpression itself has all information
             validator = UpdateExpressionValidator(
                 update_expression_ast,
                 expression_attribute_names=expression_attribute_names,
@@ -527,6 +538,7 @@ class DynamoDBBackend(BaseBackend):
                 ).execute()
             except ItemSizeTooLarge:
                 raise ItemSizeToUpdateTooLarge()
+
         else:
             item.update_with_attribute_updates(attribute_updates)  # type: ignore
         if table.stream_shard is not None:
@@ -536,11 +548,12 @@ class DynamoDBBackend(BaseBackend):
     def delete_item(
         self,
         table_name: str,
-        key: Dict[str, Any],
-        expression_attribute_names: Optional[Dict[str, Any]] = None,
-        expression_attribute_values: Optional[Dict[str, Any]] = None,
-        condition_expression: Optional[str] = None,
-    ) -> Optional[Item]:
+        key: dict[str, Any],
+        expression_attribute_names: dict[str, Any] | None = None,
+        expression_attribute_values: dict[str, Any] | None = None,
+        condition_expression: str | None = None,
+        return_values_on_condition_check_failure: str | None = None,
+    ) -> Item | None:
         table = self.get_table(table_name)
 
         hash_value, range_value = self.get_keys_value(table, key)
@@ -552,13 +565,20 @@ class DynamoDBBackend(BaseBackend):
             expression_attribute_values,
         )
         if not condition_op.expr(item):
-            raise ConditionalCheckFailed
+            if (
+                return_values_on_condition_check_failure == "ALL_OLD"
+                and item is not None
+            ):
+                raise ConditionalCheckFailed(item=item.to_json()["Attributes"])
+            else:
+                raise ConditionalCheckFailed
 
         return table.delete_item(hash_value, range_value)
 
-    def update_time_to_live(self, table_name: str, ttl_spec: Dict[str, Any]) -> None:
-        table = self.tables.get(table_name)
-        if table is None:
+    def update_time_to_live(self, table_name: str, ttl_spec: dict[str, Any]) -> None:
+        try:
+            table = self.get_table(table_name)
+        except ResourceNotFoundException:
             raise JsonRESTError("ResourceNotFound", "Table not found")
 
         if "Enabled" not in ttl_spec or "AttributeName" not in ttl_spec:
@@ -573,85 +593,85 @@ class DynamoDBBackend(BaseBackend):
             table.ttl["TimeToLiveStatus"] = "DISABLED"
         table.ttl["AttributeName"] = ttl_spec["AttributeName"]
 
-    def describe_time_to_live(self, table_name: str) -> Dict[str, Any]:
-        table = self.tables.get(table_name)
-        if table is None:
+    def describe_time_to_live(self, table_name: str) -> dict[str, Any]:
+        try:
+            table = self.get_table(table_name)
+        except ResourceNotFoundException:
             raise JsonRESTError("ResourceNotFound", "Table not found")
 
         return table.ttl
 
-    def transact_write_items(self, transact_items: List[Dict[str, Any]]) -> None:
+    def transact_write_items(self, transact_items: list[dict[str, Any]]) -> None:
         if len(transact_items) > 100:
             raise TooManyTransactionsException()
         # Create a backup in case any of the transactions fail
-        original_table_state = copy.deepcopy(self.tables)
-        target_items: Set[Tuple[str, str]] = set()
+        original_table_state: dict[str, Table] = {}
+        for item in transact_items:
+            _, op = next(iter(item.items()))
+            table_name = op.get("TableName")
+            if table_name and table_name in self.tables:
+                original_table_state[table_name] = copy.deepcopy(
+                    self.tables[table_name]
+                )
 
-        def check_unicity(table_name: str, key: Dict[str, Any]) -> None:
-            item = (str(table_name), str(key))
+        target_items: set[tuple[str, str]] = set()
+
+        def check_unicity(table_name: str, key: dict[str, Any]) -> None:
+            item = (str(table_name), str(dict(sorted(key.items()))))
             if item in target_items:
                 raise MultipleTransactionsException()
             target_items.add(item)
 
-        errors: List[
-            Union[Tuple[str, str, Dict[str, Any]], Tuple[None, None, None]]
+        errors: list[
+            tuple[str, str, dict[str, Any]] | tuple[None, None, None]
         ] = []  # [(Code, Message, Item), ..]
         for item in transact_items:
-            original_item: Optional[Dict[str, Any]] = None
-            # check transact writes are not performing multiple operations
-            # in the same item
+            original_item: dict[str, Any] | None = None
+            # Check transact writes are not performing multiple operations on the same item
             if len(list(item.keys())) > 1:
                 raise TransactWriteSingleOpException
 
             try:
-                if "ConditionCheck" in item:
-                    item = item["ConditionCheck"]
-                    key = item["Key"]
-                    table_name = item["TableName"]
-                    check_unicity(table_name, key)
-                    condition_expression = item.get("ConditionExpression", None)
-                    expression_attribute_names = item.get(
-                        "ExpressionAttributeNames", None
-                    )
-                    expression_attribute_values = item.get(
-                        "ExpressionAttributeValues", None
-                    )
-                    current = self.get_item(table_name, key)
+                op_type, op = next(iter(item.items()))
+                if op_type not in {"ConditionCheck", "Put", "Delete", "Update"}:
+                    raise ValueError("Unsupported transaction operation")
 
+                table_name = op["TableName"]
+                condition_expression = op.get("ConditionExpression")
+                expression_attribute_names = op.get("ExpressionAttributeNames")
+                expression_attribute_values = op.get("ExpressionAttributeValues")
+                return_values_on_condition_check_failure = op.get(
+                    "ReturnValuesOnConditionCheckFailure"
+                )
+
+                if op_type == "Put":
+                    attrs = op["Item"]
+                    table = self.get_table(table_name)
+                    key = {table.hash_key_attr: attrs[table.hash_key_attr]}
+                    if table.range_key_attr is not None:
+                        key[table.range_key_attr] = attrs[table.range_key_attr]
+                else:
+                    key = op["Key"]
+
+                check_unicity(table_name, key)
+
+                current = self.get_item(table_name, key)
+                if condition_expression is not None:
                     condition_op = get_filter_expression(
                         condition_expression,
                         expression_attribute_names,
                         expression_attribute_values,
                     )
                     if not condition_op.expr(current):
-                        raise ConditionalCheckFailed()
-                elif "Put" in item:
-                    item = item["Put"]
-                    attrs = item["Item"]
-                    table_name = item["TableName"]
-                    table = self.get_table(table_name)
-                    key = {table.hash_key_attr: attrs[table.hash_key_attr]}
-                    if table.range_key_attr is not None:
-                        key[table.range_key_attr] = attrs[table.range_key_attr]
-                    check_unicity(table_name, key)
-                    condition_expression = item.get("ConditionExpression", None)
-                    expression_attribute_names = item.get(
-                        "ExpressionAttributeNames", None
-                    )
-                    expression_attribute_values = item.get(
-                        "ExpressionAttributeValues", None
-                    )
+                        if (
+                            return_values_on_condition_check_failure == "ALL_OLD"
+                            and current
+                        ):
+                            original_item = current.to_json()["Attributes"]
+                        raise ConditionalCheckFailed(item=original_item)
 
-                    return_values_on_condition_check_failure = item.get(
-                        "ReturnValuesOnConditionCheckFailure", None
-                    )
-                    current = self.get_item(table_name, attrs)
-                    if (
-                        return_values_on_condition_check_failure == "ALL_OLD"
-                        and current
-                    ):
-                        original_item = current.to_json()["Attributes"]
-
+                if op_type == "Put":
+                    attrs = op["Item"]
                     self.put_item(
                         table_name,
                         attrs,
@@ -659,18 +679,7 @@ class DynamoDBBackend(BaseBackend):
                         expression_attribute_names=expression_attribute_names,
                         expression_attribute_values=expression_attribute_values,
                     )
-                elif "Delete" in item:
-                    item = item["Delete"]
-                    key = item["Key"]
-                    table_name = item["TableName"]
-                    check_unicity(table_name, key)
-                    condition_expression = item.get("ConditionExpression", None)
-                    expression_attribute_names = item.get(
-                        "ExpressionAttributeNames", None
-                    )
-                    expression_attribute_values = item.get(
-                        "ExpressionAttributeValues", None
-                    )
+                elif op_type == "Delete":
                     self.delete_item(
                         table_name,
                         key,
@@ -678,19 +687,8 @@ class DynamoDBBackend(BaseBackend):
                         expression_attribute_names=expression_attribute_names,
                         expression_attribute_values=expression_attribute_values,
                     )
-                elif "Update" in item:
-                    item = item["Update"]
-                    key = item["Key"]
-                    table_name = item["TableName"]
-                    check_unicity(table_name, key)
-                    update_expression = item["UpdateExpression"]
-                    condition_expression = item.get("ConditionExpression", None)
-                    expression_attribute_names = item.get(
-                        "ExpressionAttributeNames", None
-                    )
-                    expression_attribute_values = item.get(
-                        "ExpressionAttributeValues", None
-                    )
+                elif op_type == "Update":
+                    update_expression = op["UpdateExpression"]
                     self.update_item(
                         table_name,
                         key,
@@ -699,21 +697,25 @@ class DynamoDBBackend(BaseBackend):
                         expression_attribute_names=expression_attribute_names,
                         expression_attribute_values=expression_attribute_values,
                     )
-                else:
-                    raise ValueError
                 errors.append((None, None, None))
-            except MultipleTransactionsException:
+            except (MultipleTransactionsException, MockValidationException):
                 # Rollback to the original state, and reraise the error
-                self.tables = original_table_state
-                raise MultipleTransactionsException()
+                for table_name in original_table_state:
+                    self.tables[table_name] = original_table_state[table_name]
+                raise
+            except ConditionalCheckFailed as e:
+                errors.append(("ConditionalCheckFailed", str(e.message), original_item))  # type: ignore
             except Exception as e:  # noqa: E722 Do not use bare except
-                errors.append((type(e).__name__, e.message, original_item))  # type: ignore
-        if any([code is not None for code, _, _ in errors]):
+                # For other exceptions, capture their details
+                errors.append((type(e).__name__, str(e), original_item))  # type: ignore
+
+        if any(code is not None for code, _, _ in errors):
             # Rollback to the original state, and reraise the errors
-            self.tables = original_table_state
+            for table_name in original_table_state:
+                self.tables[table_name] = original_table_state[table_name]
             raise TransactionCanceledException(errors)
 
-    def describe_continuous_backups(self, table_name: str) -> Dict[str, Any]:
+    def describe_continuous_backups(self, table_name: str) -> dict[str, Any]:
         try:
             table = self.get_table(table_name)
         except ResourceNotFoundException:
@@ -722,25 +724,36 @@ class DynamoDBBackend(BaseBackend):
         return table.continuous_backups
 
     def update_continuous_backups(
-        self, table_name: str, point_in_time_spec: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, table_name: str, point_in_time_spec: dict[str, Any]
+    ) -> dict[str, Any]:
         try:
             table = self.get_table(table_name)
         except ResourceNotFoundException:
             raise TableNotFoundException(table_name)
 
-        if (
-            point_in_time_spec["PointInTimeRecoveryEnabled"]
-            and table.continuous_backups["PointInTimeRecoveryDescription"][
-                "PointInTimeRecoveryStatus"
-            ]
-            == "DISABLED"
-        ):
-            table.continuous_backups["PointInTimeRecoveryDescription"] = {
-                "PointInTimeRecoveryStatus": "ENABLED",
-                "EarliestRestorableDateTime": unix_time(),
-                "LatestRestorableDateTime": unix_time(),
-            }
+        if point_in_time_spec["PointInTimeRecoveryEnabled"]:
+            if (
+                table.continuous_backups["PointInTimeRecoveryDescription"][
+                    "PointInTimeRecoveryStatus"
+                ]
+                == "DISABLED"
+            ):
+                table.continuous_backups["PointInTimeRecoveryDescription"] = {
+                    "PointInTimeRecoveryStatus": "ENABLED",
+                    "EarliestRestorableDateTime": unix_time(),
+                    "LatestRestorableDateTime": unix_time(),
+                }
+            if "RecoveryPeriodInDays" in point_in_time_spec:
+                table.continuous_backups["PointInTimeRecoveryDescription"][
+                    "RecoveryPeriodInDays"
+                ] = point_in_time_spec["RecoveryPeriodInDays"]
+            elif (
+                "RecoveryPeriodInDays"
+                not in table.continuous_backups["PointInTimeRecoveryDescription"]
+            ):
+                table.continuous_backups["PointInTimeRecoveryDescription"][
+                    "RecoveryPeriodInDays"
+                ] = 35
         elif not point_in_time_spec["PointInTimeRecoveryEnabled"]:
             table.continuous_backups["PointInTimeRecoveryDescription"] = {
                 "PointInTimeRecoveryStatus": "DISABLED"
@@ -753,10 +766,15 @@ class DynamoDBBackend(BaseBackend):
             raise BackupNotFoundException(backup_arn)
         return self.backups[backup_arn]
 
-    def list_backups(self, table_name: str) -> List[Backup]:
+    def list_backups(self, table_name: str) -> list[Backup]:
         backups = list(self.backups.values())
         if table_name is not None:
-            backups = [backup for backup in backups if backup.table.name == table_name]
+            backups = [
+                backup
+                for backup in backups
+                if backup.table.name == table_name
+                or backup.table.table_arn == table_name
+            ]
         return backups
 
     def create_backup(self, table_name: str, backup_name: str) -> Backup:
@@ -836,8 +854,8 @@ class DynamoDBBackend(BaseBackend):
         pass
 
     def execute_statement(
-        self, statement: str, parameters: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+        self, statement: str, parameters: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """
         Pagination is not yet implemented.
 
@@ -845,11 +863,21 @@ class DynamoDBBackend(BaseBackend):
         """
         # We need to execute a statement - but we don't know which table
         # Just pass all tables to PartiQL
-        source_data: Dict[str, str] = dict()
+        source_data: dict[str, list[Any]] = {}
         for table in self.tables.values():
             source_data[table.name] = [  # type: ignore
                 item.to_json()["Attributes"] for item in table.all_items()
             ]
+            for index in table.all_indexes():
+                source_data[f"{table.name}.{index.name}"] = [
+                    item.to_json()["Attributes"]
+                    for item in table.all_items()
+                    # Only add items that contain all index schema attributes
+                    if all(
+                        index_attr["AttributeName"] in item.attrs
+                        for index_attr in index.schema
+                    )
+                ]
 
         return_data, updates_per_table = partiql.query(
             statement, source_data, parameters
@@ -876,8 +904,8 @@ class DynamoDBBackend(BaseBackend):
         return return_data
 
     def execute_transaction(
-        self, statements: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+        self, statements: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """
         Please see the documentation for `execute_statement` to see the limitations of what is supported.
         """
@@ -890,8 +918,8 @@ class DynamoDBBackend(BaseBackend):
         return responses
 
     def batch_execute_statement(
-        self, statements: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+        self, statements: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """
         Please see the documentation for `execute_statement` to see the limitations of what is supported.
         """
@@ -938,15 +966,15 @@ class DynamoDBBackend(BaseBackend):
 
     def import_table(
         self,
-        s3_source: Dict[str, str],
-        input_format: Optional[str],
-        compression_type: Optional[str],
+        s3_source: dict[str, str],
+        input_format: str | None,
+        compression_type: str | None,
         table_name: str,
         billing_mode: str,
-        throughput: Optional[Dict[str, int]],
-        key_schema: List[Dict[str, str]],
-        global_indexes: Optional[List[Dict[str, Any]]],
-        attrs: List[Dict[str, str]],
+        throughput: dict[str, int] | None,
+        key_schema: list[dict[str, str]],
+        global_indexes: list[dict[str, Any]] | None,
+        attrs: list[dict[str, str]],
     ) -> TableImport:
         """
         Only InputFormat=DYNAMODB_JSON is supported so far.
@@ -971,6 +999,127 @@ class DynamoDBBackend(BaseBackend):
 
     def describe_import(self, import_arn: str) -> TableImport:
         return self.table_imports[import_arn]
+
+    def export_table(
+        self,
+        s3_bucket: str,
+        s3_prefix: str,
+        table_arn: str,
+        export_format: str,
+        export_type: str,
+        s3_bucket_owner: str,
+    ) -> TableExport:
+        """Only ExportFormat=DYNAMODB_JSON is supported so far.
+        Only exports one file following DYNAMODB_JSON format to the s3 location. Other files aren't created.
+        Incremental export is also not supported.
+        """
+        table = next(
+            (t for t in self.tables.values() if t.table_arn == table_arn), None
+        )
+        if not table:
+            raise TableNotFoundException(name=table_arn)
+        if (
+            table.continuous_backups["PointInTimeRecoveryDescription"][
+                "PointInTimeRecoveryStatus"
+            ]
+            != "ENABLED"
+        ):
+            raise PointInTimeRecoveryUnavailable(name=table_arn.split("/")[-1])
+        table_export = TableExport(
+            s3_bucket=s3_bucket,
+            s3_prefix=s3_prefix,
+            region_name=self.region_name,
+            account_id=s3_bucket_owner if s3_bucket_owner else self.account_id,
+            table=table,
+            export_format=export_format,
+            export_type=export_type,
+        )
+        self.table_exports[table_export.arn] = table_export
+        table_export.start()
+        return table_export
+
+    def describe_export(self, export_arn: str) -> TableExport:
+        return self.table_exports[export_arn]
+
+    def list_exports(self, table_arn: str) -> list[TableExport]:
+        exports = []
+        for export_arn in self.table_exports:
+            if self.table_exports[export_arn].table.table_arn == table_arn:
+                exports.append(self.table_exports[export_arn])
+        return exports
+
+    def put_resource_policy(
+        self, resource_arn: str, policy_doc: str, expected_revision_id: str | None
+    ) -> ResourcePolicy:
+        table_name = resource_arn.split("/")[-1]
+        if table_name not in self.tables:
+            raise ResourceNotFoundException(table_name=table_name)
+        if current_policy := self.resource_policies.get(resource_arn):
+            if expected_revision_id == "NO_POLICY":
+                raise PolicyNotFoundException(
+                    f"Resource-based policy not found for the provided ResourceArn: Requested policy update expecting none to be present for table {table_name}, but a policy exists with revision id {current_policy.revision_id}."
+                )
+            if (
+                expected_revision_id
+                and current_policy.revision_id != expected_revision_id
+            ):
+                raise PolicyNotFoundException(
+                    f"Resource-based policy not found for the provided ResourceArn: Requested update for policy with revision id {expected_revision_id}, but the policy associated to target table {table_name} has revision id {current_policy.revision_id}."
+                )
+            if current_policy.policy_doc == policy_doc:
+                return current_policy
+        policy = ResourcePolicy(
+            resource_arn=resource_arn,
+            policy_doc=policy_doc,
+        )
+        self.resource_policies[resource_arn] = policy
+        return policy
+
+    def get_resource_policy(self, resource_arn: str) -> ResourcePolicy:
+        table_name = resource_arn.split("/")[-1]
+        if table_name not in self.tables:
+            raise ResourceNotFoundException(table_name=table_name)
+        if resource_arn not in self.resource_policies:
+            raise PolicyNotFoundException(
+                f"Resource-based policy not found for the provided ResourceArn: {resource_arn}"
+            )
+        return self.resource_policies[resource_arn]
+
+    def delete_resource_policy(
+        self, resource_arn: str, expected_revision_id: str | None
+    ) -> None:
+        table_name = resource_arn.split("/")[-1]
+        if table_name not in self.tables or not (
+            policy := self.resource_policies.get(resource_arn)
+        ):
+            raise ResourceNotFoundException(table_name=table_name)
+        if expected_revision_id and policy.revision_id != expected_revision_id:
+            raise PolicyNotFoundException(
+                f"Resource-based policy not found for the provided ResourceArn: Requested update for policy with revision id {expected_revision_id}, but the policy associated to target table {table_name} has revision id {policy.revision_id}."
+            )
+        self.resource_policies.pop(resource_arn)
+
+    # Resource Groups Tagging API (TaggableResourcesMixin method overrides)
+    def iter_tagged_resources(self) -> Iterator[TaggedResource]:
+        for table in self.tables.values():
+            yield TaggedResource(
+                arn=table.table_arn,
+                tags={t["Key"]: t["Value"] for t in (table.tags or [])},
+                resource_type="dynamodb:table",
+            )
+
+    def tag_resource(self, arn: str, tags: dict[str, str]) -> None:
+        new_tags = [{"Key": k, "Value": v} for k, v in tags.items()]
+        for table in self.tables:
+            if self.tables[table].table_arn == arn:
+                self.tables[table].tags.extend(new_tags)
+
+    def untag_resource(self, arn: str, tag_keys: list[str]) -> None:
+        for table in self.tables:
+            if self.tables[table].table_arn == arn:
+                self.tables[table].tags = [
+                    tag for tag in self.tables[table].tags if tag["Key"] not in tag_keys
+                ]
 
 
 dynamodb_backends = BackendDict(DynamoDBBackend, "dynamodb")

@@ -36,7 +36,7 @@ def test_update_different_map_elements_in_single_request(table_name=None):
         Key={"pk": "example_id"},
         UpdateExpression=(
             """
-            ADD 
+            ADD
               MyTotalCount :MyCount
             """
         ),
@@ -90,6 +90,22 @@ def test_update_item_add_float(table_name=None):
         ExpressionAttributeValues={":delta": Decimal("25.41")},
     )
     assert table.scan()["Items"][0]["nr"] == Decimal("31.41")
+
+
+@pytest.mark.aws_verified
+@dynamodb_aws_verified()
+def test_delete_last_item_from_map(table_name=None):
+    table = boto3.resource("dynamodb", "us-east-1").Table(table_name)
+
+    table.put_item(Item={"pk": "foo", "map": {"sset": {"foo"}}})
+    resp = table.update_item(
+        Key={"pk": "foo"},
+        UpdateExpression="DELETE #map.#sset :s",
+        ExpressionAttributeNames={"#map": "map", "#sset": "sset"},
+        ExpressionAttributeValues={":s": {"foo"}},
+        ReturnValues="ALL_NEW",
+    )
+    assert {"pk": "foo", "map": {}} == resp["Attributes"]
 
 
 @pytest.mark.aws_verified
@@ -161,7 +177,7 @@ def test_update_item_add_empty_set(table_name=None):
     assert err["Code"] == "ValidationException"
     assert (
         err["Message"]
-        == "ExpressionAttributeValues contains invalid value: One or more parameter values were invalid: An string set  may not be empty"
+        == "1 validation error detected: One or more parameter values were invalid: An string set  may not be empty"
     )
 
     assert dynamodb.scan(TableName=table_name)["Items"] == [{"pk": {"S": "foo"}}]
@@ -181,9 +197,81 @@ def test_update_item_add_empty_set(table_name=None):
     assert err["Code"] == "ValidationException"
     assert (
         err["Message"]
-        == "ExpressionAttributeValues contains invalid value: One or more parameter values were invalid: An string set  may not be empty"
+        == "1 validation error detected: One or more parameter values were invalid: An string set  may not be empty"
     )
 
     assert dynamodb.scan(TableName=table_name)["Items"] == [
         {"pk": {"S": "foo"}, "stringset": {"SS": ["item1"]}}
     ]
+
+
+@pytest.mark.aws_verified
+@dynamodb_aws_verified()
+def test_update_item_with_empty_values(table_name=None):
+    dynamodb = boto3.client("dynamodb", "us-east-1")
+
+    dynamodb.put_item(TableName=table_name, Item={"pk": {"S": "foo"}})
+    with pytest.raises(ClientError) as exc:
+        dynamodb.update_item(
+            TableName=table_name,
+            Key={"pk": {"S": "foo"}},
+            UpdateExpression="SET #d = :s",
+            ExpressionAttributeNames={"#d": "d"},
+            ExpressionAttributeValues={},
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "ValidationException"
+    assert (
+        err["Message"]
+        == "1 validation error detected: ExpressionAttributeValues must not be empty"
+    )
+
+
+@pytest.mark.aws_verified
+@dynamodb_aws_verified()
+def test_update_item_with_empty_expression(table_name=None):
+    dynamodb = boto3.client("dynamodb", "us-east-1")
+
+    dynamodb.put_item(TableName=table_name, Item={"pk": {"S": "foo"}})
+    with pytest.raises(ClientError) as exc:
+        dynamodb.update_item(
+            TableName=table_name,
+            Key={"pk": {"S": "foo"}},
+            UpdateExpression="",
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "ValidationException"
+    assert (
+        err["Message"]
+        == "1 validation error detected: Invalid UpdateExpression: The expression can not be empty;"
+    )
+
+
+@pytest.mark.aws_verified
+@dynamodb_aws_verified()
+def test_update_expression_remove_list_and_attribute(table_name=None):
+    ddb_client = boto3.client("dynamodb", "us-east-1")
+    payload = {
+        "pk": {"S": "primary_key"},
+        "user_list": {
+            "L": [
+                {"M": {"name": {"S": "John"}, "surname": {"S": "Doe"}}},
+                {"M": {"name": {"S": "Jane"}, "surname": {"S": "Smith"}}},
+            ]
+        },
+        "some_param": {"NULL": True},
+    }
+    ddb_client.put_item(TableName=table_name, Item=payload)
+    ddb_client.update_item(
+        TableName=table_name,
+        Key={"pk": {"S": "primary_key"}},
+        UpdateExpression="REMOVE #ulist[0], some_param",
+        ExpressionAttributeNames={"#ulist": "user_list"},
+    )
+    item = ddb_client.get_item(TableName=table_name, Key={"pk": {"S": "primary_key"}})[
+        "Item"
+    ]
+    assert item == {
+        "user_list": {"L": [{"M": {"name": {"S": "Jane"}, "surname": {"S": "Smith"}}}]},
+        "pk": {"S": "primary_key"},
+    }

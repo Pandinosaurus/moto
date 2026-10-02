@@ -14,15 +14,19 @@ iam
 
 |start-h3| Implemented features for this service |end-h3|
 
+- [ ] accept_delegation_request
+- [ ] acquire_role
 - [ ] add_client_id_to_open_id_connect_provider
 - [X] add_role_to_instance_profile
 - [X] add_user_to_group
+- [ ] associate_delegation_request
 - [X] attach_group_policy
 - [X] attach_role_policy
 - [X] attach_user_policy
 - [ ] change_password
 - [X] create_access_key
 - [X] create_account_alias
+- [ ] create_delegation_request
 - [X] create_group
 - [X] create_instance_profile
 - [X] create_login_profile
@@ -64,60 +68,72 @@ iam
 - [X] detach_group_policy
 - [X] detach_role_policy
 - [X] detach_user_policy
+- [ ] disable_organizations_root_credentials_management
+- [ ] disable_organizations_root_sessions
+- [ ] disable_outbound_web_identity_federation
 - [X] enable_mfa_device
   Enable MFA Device for user.
 
+- [ ] enable_organizations_root_credentials_management
+- [ ] enable_organizations_root_sessions
+- [ ] enable_outbound_web_identity_federation
 - [ ] generate_credential_report
 - [ ] generate_organizations_access_report
 - [ ] generate_service_last_accessed_details
 - [X] get_access_key_last_used
 - [X] get_account_authorization_details
 - [X] get_account_password_policy
+- [ ] get_account_properties
 - [X] get_account_summary
 - [ ] get_context_keys_for_custom_policy
 - [ ] get_context_keys_for_principal_policy
 - [X] get_credential_report
+- [ ] get_delegation_request
 - [X] get_group
   
-        Pagination is not yet implemented
-        
+Pagination is not yet implemented
+
 
 - [X] get_group_policy
+- [ ] get_human_readable_summary
 - [X] get_instance_profile
 - [X] get_login_profile
 - [ ] get_mfa_device
 - [X] get_open_id_connect_provider
 - [ ] get_organizations_access_report
+- [ ] get_outbound_web_identity_federation_info
 - [X] get_policy
 - [X] get_policy_version
 - [X] get_role
 - [X] get_role_policy
+- [ ] get_role_template_version
 - [X] get_saml_provider
 - [X] get_server_certificate
 - [ ] get_service_last_accessed_details
 - [ ] get_service_last_accessed_details_with_entities
 - [X] get_service_linked_role_deletion_status
   
-        This method always succeeds for now - we do not yet keep track of deletions
-        
+This method always succeeds for now - we do not yet keep track of deletions
+
 
 - [X] get_ssh_public_key
 - [X] get_user
 - [X] get_user_policy
 - [X] list_access_keys
   
-        Pagination is not yet implemented
-        
+Pagination is not yet implemented
+
 
 - [X] list_account_aliases
 - [X] list_attached_group_policies
 - [X] list_attached_role_policies
 - [X] list_attached_user_policies
+- [ ] list_delegation_requests
 - [ ] list_entities_for_policy
 - [X] list_group_policies
   
-        Pagination is not yet implemented
-        
+Pagination is not yet implemented
+
 
 - [X] list_groups
 - [ ] list_groups_for_user
@@ -128,6 +144,7 @@ iam
 - [X] list_mfa_devices
 - [X] list_open_id_connect_provider_tags
 - [X] list_open_id_connect_providers
+- [ ] list_organizations_features
 - [X] list_policies
 - [ ] list_policies_granting_service_access
 - [X] list_policy_tags
@@ -140,8 +157,8 @@ iam
 - [ ] list_server_certificate_tags
 - [X] list_server_certificates
   
-        Pagination is not yet implemented
-        
+Pagination is not yet implemented
+
 
 - [ ] list_service_specific_credentials
 - [X] list_signing_certificates
@@ -150,16 +167,19 @@ iam
 - [X] list_user_tags
 - [X] list_users
 - [X] list_virtual_mfa_devices
+- [ ] put_account_properties
 - [X] put_group_policy
 - [X] put_role_permissions_boundary
 - [X] put_role_policy
 - [ ] put_user_permissions_boundary
 - [X] put_user_policy
+- [ ] reject_delegation_request
 - [ ] remove_client_id_from_open_id_connect_provider
 - [X] remove_role_from_instance_profile
 - [X] remove_user_from_group
 - [ ] reset_service_specific_credential
 - [ ] resync_mfa_device
+- [ ] send_delegation_token
 - [X] set_default_policy_version
 - [ ] set_security_token_service_preferences
 - [ ] simulate_custom_policy
@@ -183,6 +203,7 @@ iam
 - [X] update_access_key
 - [X] update_account_password_policy
 - [X] update_assume_role_policy
+- [ ] update_delegation_request
 - [X] update_group
 - [X] update_login_profile
 - [X] update_open_id_connect_provider_thumbprint

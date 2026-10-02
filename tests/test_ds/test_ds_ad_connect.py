@@ -23,7 +23,7 @@ def create_test_ad_connector(
     customer_dns_ips=None,
     customer_user_name="Admin",
     tags=None,
-):  # pylint: disable=too-many-arguments
+):
     """Return ID of a newly created valid directory."""
     if not vpc_settings:
         good_vpc_id = create_vpc(ec2_client)
@@ -249,7 +249,7 @@ def test_ds_connect_directory_describe():
     assert directory["ConnectSettings"]["CustomerUserName"] == "Admin"
     assert len(directory["ConnectSettings"]["ConnectIps"]) == 2
     assert directory["Size"] == "Small"
-    assert set(directory["DnsIpAddrs"]) == set(["1.2.3.4", "5.6.7.8"])
+    assert set(directory["DnsIpAddrs"]) == {"1.2.3.4", "5.6.7.8"}
     assert "NextToken" not in result
 
 
@@ -287,3 +287,91 @@ def test_ds_get_connect_directory_limits():
     assert limits["ConnectedDirectoriesLimitReached"]
     assert not limits["CloudOnlyDirectoriesCurrentCount"]
     assert not limits["CloudOnlyMicrosoftADCurrentCount"]
+
+
+@mock_aws
+def test_enable_describe_disable_ldaps():
+    """Test good and bad invocations of describe_directories()."""
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_ad_connector(client, ec2_client)
+
+    # Describe LDAPS settings for AD Connector without LDAPS enabled
+    ldaps = client.describe_ldaps_settings(DirectoryId=directory_id)[
+        "LDAPSSettingsInfo"
+    ]
+    assert ldaps == []
+
+    # Enable LDAPS for AD Connector and verify it is enabled
+    client.enable_ldaps(DirectoryId=directory_id, Type="Client")
+    ldaps = client.describe_ldaps_settings(DirectoryId=directory_id)[
+        "LDAPSSettingsInfo"
+    ]
+    assert len(ldaps) == 1
+    assert ldaps[0]["LDAPSStatus"] == "Enabled"
+
+    # Disable LDAPS for AD Connector and verify it is disabled
+    client.disable_ldaps(DirectoryId=directory_id, Type="Client")
+    ldaps = client.describe_ldaps_settings(DirectoryId=directory_id)[
+        "LDAPSSettingsInfo"
+    ]
+    assert len(ldaps) == 1
+    assert ldaps[0]["LDAPSStatus"] == "Disabled"
+
+
+@mock_aws
+def test_enable_radius():
+    """Test enable_radius and disable_radius for AD Connector."""
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_ad_connector(client, ec2_client)
+
+    radius_settings = {
+        "RadiusServers": ["1.2.3.4"],
+        "RadiusPort": 1812,
+        "RadiusTimeout": 30,
+        "RadiusRetries": 3,
+        "SharedSecret": "supersecret",
+        "AuthenticationProtocol": "PAP",
+        "DisplayLabel": "MFA",
+        "UseSameUsername": False,
+    }
+    client.enable_radius(DirectoryId=directory_id, RadiusSettings=radius_settings)
+
+    directory = client.describe_directories(DirectoryIds=[directory_id])[
+        "DirectoryDescriptions"
+    ][0]
+    assert directory["RadiusStatus"] == "Completed"
+    assert directory["RadiusSettings"]["RadiusServers"] == ["1.2.3.4"]
+    assert directory["RadiusSettings"]["RadiusPort"] == 1812
+    assert directory["RadiusSettings"]["AuthenticationProtocol"] == "PAP"
+
+
+@mock_aws
+def test_disable_radius():
+    """Test disabling RADIUS after enabling it for AD Connector."""
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_ad_connector(client, ec2_client)
+
+    radius_settings = {
+        "RadiusServers": ["1.2.3.4"],
+        "RadiusPort": 1812,
+        "RadiusTimeout": 30,
+        "RadiusRetries": 3,
+        "SharedSecret": "supersecret",
+        "AuthenticationProtocol": "PAP",
+        "DisplayLabel": "MFA",
+        "UseSameUsername": False,
+    }
+    client.enable_radius(DirectoryId=directory_id, RadiusSettings=radius_settings)
+    client.disable_radius(DirectoryId=directory_id)
+
+    directory = client.describe_directories(DirectoryIds=[directory_id])[
+        "DirectoryDescriptions"
+    ][0]
+    assert "RadiusStatus" not in directory
+    assert directory["RadiusSettings"] == {}

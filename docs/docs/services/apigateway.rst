@@ -23,6 +23,7 @@ apigateway
 - [ ] create_documentation_part
 - [ ] create_documentation_version
 - [X] create_domain_name
+- [ ] create_domain_name_access_association
 - [X] create_model
 - [X] create_request_validator
 - [X] create_resource
@@ -39,12 +40,13 @@ apigateway
 - [ ] delete_documentation_part
 - [ ] delete_documentation_version
 - [X] delete_domain_name
+- [ ] delete_domain_name_access_association
 - [X] delete_gateway_response
 - [X] delete_integration
 - [X] delete_integration_response
 - [X] delete_method
 - [X] delete_method_response
-- [ ] delete_model
+- [X] delete_model
 - [X] delete_request_validator
 - [X] delete_resource
 - [X] delete_rest_api
@@ -55,7 +57,7 @@ apigateway
 - [ ] flush_stage_authorizers_cache
 - [ ] flush_stage_cache
 - [ ] generate_client_certificate
-- [ ] get_account
+- [X] get_account
 - [X] get_api_key
 - [X] get_api_keys
 - [X] get_authorizer
@@ -71,13 +73,14 @@ apigateway
 - [ ] get_documentation_version
 - [ ] get_documentation_versions
 - [X] get_domain_name
+- [ ] get_domain_name_access_associations
 - [X] get_domain_names
 - [ ] get_export
 - [X] get_gateway_response
 - [X] get_gateway_responses
   
-        Pagination is not yet implemented
-        
+Pagination is not yet implemented
+
 
 - [X] get_integration
 - [X] get_integration_response
@@ -106,15 +109,15 @@ apigateway
 - [X] get_vpc_link
 - [X] get_vpc_links
   
-        Pagination has not yet been implemented
-        
+Pagination has not yet been implemented
+
 
 - [ ] import_api_keys
 - [ ] import_documentation_parts
 - [X] import_rest_api
   
-        Only a subset of the OpenAPI spec 3.x is currently implemented.
-        
+Only a subset of the OpenAPI spec 3.x is currently implemented.
+
 
 - [X] put_gateway_response
 - [X] put_integration
@@ -123,14 +126,15 @@ apigateway
 - [X] put_method_response
 - [X] put_rest_api
   
-        Only a subset of the OpenAPI spec 3.x is currently implemented.
-        
+Only a subset of the OpenAPI spec 3.x is currently implemented.
 
+
+- [ ] reject_domain_name_access_association
 - [ ] tag_resource
 - [ ] test_invoke_authorizer
 - [ ] test_invoke_method
 - [ ] untag_resource
-- [ ] update_account
+- [X] update_account
 - [X] update_api_key
 - [X] update_authorizer
 - [X] update_base_path_mapping
@@ -152,12 +156,12 @@ apigateway
 - [ ] update_usage
 - [X] update_usage_plan
   
-        The following PatchOperations are currently supported:
-        add    : Everything except /apiStages/{apidId:stageName}/throttle/ and children
-        replace: Everything except /apiStages/{apidId:stageName}/throttle/ and children
-        remove : Everything except /apiStages/{apidId:stageName}/throttle/ and children
-        copy   : Nothing yet
-        
+The following PatchOperations are currently supported:
+add    : Everything except /apiStages/{apidId:stageName}/throttle/ and children
+replace: Everything except /apiStages/{apidId:stageName}/throttle/ and children
+remove : Everything except /apiStages/{apidId:stageName}/throttle/ and children
+copy   : Nothing yet
+
 
 - [ ] update_vpc_link
 

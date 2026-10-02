@@ -1,6 +1,6 @@
 import datetime
 import logging
-from typing import Any, Final, Optional
+from typing import Any, Final
 
 from moto.stepfunctions.parser.asl.component.state.choice.comparison.comparison_operator_type import (
     ComparisonOperatorType,
@@ -90,7 +90,7 @@ class IsTimestamp(Operator):
         return str(ComparisonOperatorType.IsTimestamp)
 
     @staticmethod
-    def string_to_timestamp(string: str) -> Optional[datetime.datetime]:
+    def string_to_timestamp(string: str) -> datetime.datetime | None:
         try:
             return datetime.datetime.strptime(string, IsTimestamp.TIMESTAMP_FORMAT)
         except Exception:
@@ -104,7 +104,9 @@ class IsTimestamp(Operator):
     def eval(env: Environment, value: Any) -> None:
         variable = env.stack.pop()
         LOG.warning(
-            f"State Choice's 'IsTimestamp' operator is not fully supported for input '{variable}' and target '{value}'."
+            "State Choice's 'IsTimestamp' operator is not fully supported for input '%s' and target '%s'.",
+            variable,
+            value,
         )
         res = IsTimestamp.is_timestamp(variable) is value
         env.stack.append(res)

@@ -32,7 +32,7 @@ def test_get_partitions_expression_unknown_column():
         )
 
     assert exc.value.response["Error"]["Code"] == "InvalidInputException"
-    assert "Unknown column 'unknown_col'" in exc.value.response["Error"]["Message"]
+    assert exc.value.response["Error"]["Message"] == "Invalid partition expression!"
 
 
 @mock_aws
@@ -200,7 +200,7 @@ def test_get_partitions_expression_string_column():
         client.get_partitions(**kwargs, Expression="unknown_col LIKE 'two'")
 
     assert exc.value.response["Error"]["Code"] == "InvalidInputException"
-    assert "Unknown column 'unknown_col'" in exc.value.response["Error"]["Message"]
+    assert exc.value.response["Error"]["Message"] == "Invalid partition expression!"
 
 
 @mock_aws
@@ -371,7 +371,7 @@ def test_get_partition_expression_warnings_and_exceptions():
         client.get_partitions(**kwargs, Expression="unknown_col = 'test'")
 
     assert exc.value.response["Error"]["Code"] == "InvalidInputException"
-    assert "Unknown column 'unknown_col'" in exc.value.response["Error"]["Message"]
+    assert exc.value.response["Error"]["Message"] == "Invalid partition expression!"
 
     with pytest.raises(ClientError) as exc:
         client.get_partitions(
@@ -380,3 +380,27 @@ def test_get_partition_expression_warnings_and_exceptions():
 
     assert exc.value.response["Error"]["Code"] == "InvalidInputException"
     assert "Unsupported expression" in exc.value.response["Error"]["Message"]
+
+
+@mock_aws
+def test_get_partitions_expression_empty_returns_all():
+    # AWS Glue treats a blank Expression as "no filter"; the SDK-v1 Hive metastore Glue
+    # client sends Expression='' when listing all partitions. Ensure moto mirrors AWS
+    # instead of raising InvalidInputException on the empty string.
+    client = boto3.client("glue", region_name="us-east-1")
+    database_name = "myspecialdatabase"
+    table_name = "myfirsttable"
+    columns = [helpers.create_column("int_col", "int")]
+
+    helpers.create_database(client, database_name)
+
+    args = (client, database_name, table_name)
+    helpers.create_table(*args, partition_keys=columns)
+    helpers.create_partition(*args, values=["1"], columns=columns)
+    helpers.create_partition(*args, values=["2"], columns=columns)
+
+    kwargs = {"DatabaseName": database_name, "TableName": table_name}
+
+    for expression in ("", "   "):
+        response = client.get_partitions(Expression=expression, **kwargs)
+        assert len(response["Partitions"]) == 2

@@ -1,8 +1,9 @@
 import io
 import os
 import os.path
+from collections.abc import Callable
 from threading import Lock
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any
 
 try:
     from flask import Flask
@@ -11,7 +12,8 @@ except ImportError:
     import warnings
 
     warnings.warn(
-        "When using MotoServer, ensure that you install moto[server] to have all dependencies!\n"
+        "When using MotoServer, ensure that you install moto[server] to have all dependencies!\n",
+        stacklevel=2,
     )
     raise
 
@@ -20,8 +22,9 @@ import moto.backends as backends
 from moto.core import DEFAULT_ACCOUNT_ID
 from moto.core.base_backend import BackendDict
 from moto.core.utils import convert_to_flask_response
+from moto.settings import DISABLE_GLOBAL_CORS, MAX_FORM_MEMORY_SIZE
 
-from .utilities import AWSTestHelper, RegexConverter
+from .utilities import AWSTestHelper, RegexConverter, decompress_request_body
 
 HTTP_METHODS = ["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"]
 
@@ -45,6 +48,7 @@ SIGNING_ALIASES = {
     "execute-api": "iot",
     "iotdata": "data.iot",
     "mobiletargeting": "pinpoint",
+    "payment-cryptography": "controlplane.payment-cryptography",
 }
 
 # Some services are only recognizable by the version
@@ -60,10 +64,10 @@ class DomainDispatcherApplication:
     def __init__(self, create_app: Callable[[backends.SERVICE_NAMES], Flask]):
         self.create_app = create_app
         self.lock = Lock()
-        self.app_instances: Dict[str, Flask] = {}
+        self.app_instances: dict[str, Flask] = {}
         self.backend_url_patterns = backend_index.backend_url_patterns
 
-    def get_backend_for_host(self, host: Optional[str]) -> Any:
+    def get_backend_for_host(self, host: str | None) -> Any:
         if host is None:
             return None
 
@@ -84,8 +88,8 @@ class DomainDispatcherApplication:
             )
 
     def infer_service_region_host(
-        self, environ: Dict[str, Any], path: str
-    ) -> Optional[str]:
+        self, environ: dict[str, Any], path: str
+    ) -> str | None:
         auth = environ.get("HTTP_AUTHORIZATION")
         target = environ.get("HTTP_X_AMZ_TARGET")
         service = None
@@ -125,6 +129,8 @@ class DomainDispatcherApplication:
             if not service:
                 service, region = self.get_service_from_body(body, environ)
             if not service:
+                service, region = self.get_service_from_unsigned_path(path)
+            if not service:
                 service, region = self.get_service_from_path(path)
             if not service:
                 return None
@@ -136,6 +142,10 @@ class DomainDispatcherApplication:
             # All MediaStore API calls have a target header
             # If no target is set, assume we're trying to reach the mediastore-data service
             host = f"data.{service}.{region}.amazonaws.com"
+        elif service == "aidevops":
+            host = f"{service}.{region}.api.aws"
+        elif service == "dsql":
+            host = f"{service}.{region}.api.aws"
         elif service == "dynamodb":
             if environ["HTTP_X_AMZ_TARGET"].startswith("DynamoDBStreams"):
                 host = "dynamodbstreams"
@@ -161,14 +171,64 @@ class DomainDispatcherApplication:
             path.startswith("/v20180820/") or "s3-control" in environ["HTTP_HOST"]
         ):
             host = "s3control"
+        elif service == "s3vectors":
+            host = f"{service}.{region}.api.aws"
         elif service == "ses" and path.startswith("/v2/"):
             host = "sesv2"
+        elif service == "memorydb":
+            host = f"memory-db.{region}.amazonaws.com"
+        elif service == "bedrock-agentcore":
+            from moto.bedrockagentcore.responses import BedrockAgentCoreResponse
+            from moto.bedrockagentcorecontrol.responses import (
+                BedrockAgentCoreControlResponse,
+            )
+
+            service_to_response = {
+                "bedrock-agentcore": BedrockAgentCoreResponse,
+                "bedrock-agentcore-control": BedrockAgentCoreControlResponse,
+            }
+            for service_name, response_class in service_to_response.items():
+                resp = response_class()
+                resp.region = region
+                action = resp._get_action_from_method_and_request_uri(
+                    method=environ["REQUEST_METHOD"],
+                    request_uri=environ["PATH_INFO"],
+                )
+                if action:
+                    service = service_name
+                    break
+            host = f"{service}.{region}.amazonaws.com"
+        elif service == "bedrock":
+            # Multiple Bedrock services use the same signing name (bedrock).
+            # This is obviously a hack, but it automatically differentiates
+            # between the various Bedrock services without having to manually
+            # add every path to `moto/bedrock/urls.py`.
+            from moto.bedrock.responses import BedrockResponse
+            from moto.bedrockagent.responses import AgentsforBedrockResponse
+            from moto.bedrockruntime.responses import BedrockRuntimeResponse
+
+            service_to_response = {
+                "bedrock": BedrockResponse,
+                "bedrock-agent": AgentsforBedrockResponse,
+                "bedrock-runtime": BedrockRuntimeResponse,
+            }
+            for service_name, response_class in service_to_response.items():
+                resp = response_class()
+                resp.region = region
+                action = resp._get_action_from_method_and_request_uri(
+                    method=environ["REQUEST_METHOD"],
+                    request_uri=environ["PATH_INFO"],
+                )
+                if action:
+                    service = service_name
+                    break
+            host = f"{service}.{region}.amazonaws.com"
         else:
             host = f"{service}.{region}.amazonaws.com"
 
         return host
 
-    def get_application(self, environ: Dict[str, Any]) -> Flask:
+    def get_application(self, environ: dict[str, Any]) -> Flask:
         path_info = environ.get("PATH_INFO", "")
 
         # The URL path might contain non-ASCII text, for instance unicode S3 bucket names
@@ -177,7 +237,9 @@ class DomainDispatcherApplication:
 
         if path_info.startswith("/moto-api") or path_info == "/favicon.ico":
             host = "moto_api"
-        elif path_info.startswith("/latest/meta-data/"):
+        elif path_info.startswith("/latest/meta-data/") or path_info.startswith(
+            "/latest/api/"
+        ):
             host = "instance_metadata"
         else:
             host = None
@@ -198,7 +260,7 @@ class DomainDispatcherApplication:
                 self.app_instances[backend] = app
             return app
 
-    def _get_body(self, environ: Dict[str, Any]) -> Optional[str]:
+    def _get_body(self, environ: dict[str, Any]) -> str | None:
         body = None
         try:
             # AWS requests use querystrings as the body (Action=x&Data=y&...)
@@ -217,8 +279,8 @@ class DomainDispatcherApplication:
         return body
 
     def get_service_from_body(
-        self, body: Optional[str], environ: Dict[str, Any]
-    ) -> Tuple[Optional[str], Optional[str]]:
+        self, body: str | None, environ: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
         # Some services have the SDK Version in the body
         # If the version is unique, we can derive the service from it
         version = self.get_version_from_body(body)
@@ -228,14 +290,14 @@ class DomainDispatcherApplication:
             return SERVICE_BY_VERSION[version], region
         return None, None
 
-    def get_version_from_body(self, body: Optional[str]) -> Optional[str]:
+    def get_version_from_body(self, body: str | None) -> str | None:
         try:
             body_dict = dict(x.split("=") for x in body.split("&"))  # type: ignore
             return body_dict["Version"]
         except (AttributeError, KeyError, ValueError):
             return None
 
-    def get_action_from_body(self, body: Optional[str]) -> Optional[str]:
+    def get_action_from_body(self, body: str | None) -> str | None:
         try:
             # AWS requests use querystrings as the body (Action=x&Data=y&...)
             body_dict = dict(x.split("=") for x in body.split("&"))  # type: ignore
@@ -243,9 +305,7 @@ class DomainDispatcherApplication:
         except (AttributeError, KeyError, ValueError):
             return None
 
-    def get_service_from_path(
-        self, path_info: str
-    ) -> Tuple[Optional[str], Optional[str]]:
+    def get_service_from_path(self, path_info: str) -> tuple[str | None, str | None]:
         # Moto sometimes needs to send a HTTP request to itself
         # In which case it will send a request to 'http://localhost/service_region/whatever'
         try:
@@ -254,7 +314,27 @@ class DomainDispatcherApplication:
         except (AttributeError, KeyError, ValueError):
             return None, None
 
-    def __call__(self, environ: Dict[str, Any], start_response: Any) -> Any:
+    @staticmethod
+    def get_service_from_unsigned_path(
+        path_info: str,
+    ) -> tuple[str | None, str | None]:
+        # Must run before get_service_from_path, which would misparse the user pool ID
+        # prefix (e.g., "us-east-1" from "us-east-1_abc123") as a service name.
+        #
+        # Some unsigned GET requests can be routed based on the URL path alone.
+        # For example, Cognito JWKS endpoint:
+        #   GET /{user_pool_id}/.well-known/jwks.json
+        # The user_pool_id starts with the region (e.g. us-east-1_abc123).
+        if path_info.rstrip("/").endswith("/.well-known/jwks.json"):
+            # Extract region from user pool ID (format: {region}_{id})
+            pool_id = path_info.strip("/").split("/")[0]
+            if "_" not in pool_id:
+                return "cognito-idp", "us-east-1"
+            region = pool_id.rsplit("_", 1)[0]
+            return "cognito-idp", region
+        return None, None
+
+    def __call__(self, environ: dict[str, Any], start_response: Any) -> Any:
         backend_app = self.get_application(environ)
         return backend_app(environ, start_response)
 
@@ -270,7 +350,11 @@ def create_backend_app(service: backends.SERVICE_NAMES) -> Flask:
     backend_app = Flask("moto", template_folder=template_dir)
     backend_app.debug = True
     backend_app.service = service  # type: ignore[attr-defined]
-    CORS(backend_app)
+    backend_app.before_request(decompress_request_body)
+    backend_app.config["MAX_FORM_MEMORY_SIZE"] = MAX_FORM_MEMORY_SIZE
+
+    if not DISABLE_GLOBAL_CORS:
+        CORS(backend_app)
 
     # Reset view functions to reset the app
     backend_app.view_functions = {}
@@ -284,7 +368,7 @@ def create_backend_app(service: backends.SERVICE_NAMES) -> Flask:
         if "us-east-1" in backend_dict[DEFAULT_ACCOUNT_ID]:
             backend = backend_dict[DEFAULT_ACCOUNT_ID]["us-east-1"]
         else:
-            backend = backend_dict[DEFAULT_ACCOUNT_ID]["global"]
+            backend = backend_dict[DEFAULT_ACCOUNT_ID]["aws"]
     else:
         backend = backend_dict["global"]
 

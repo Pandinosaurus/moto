@@ -1,8 +1,9 @@
 import json
 import re
-from typing import Any, Dict, List
+from typing import Any
 
 from moto.iam.exceptions import MalformedPolicyDocument
+from moto.utilities.utils import PARTITION_NAMES
 
 VALID_TOP_ELEMENTS = ["Version", "Id", "Statement", "Conditions"]
 
@@ -56,7 +57,7 @@ VALID_CONDITION_PREFIXES = ["ForAnyValue:", "ForAllValues:"]
 
 VALID_CONDITION_POSTFIXES = ["IfExists"]
 
-SERVICE_TYPE_REGION_INFORMATION_ERROR_ASSOCIATIONS: Dict[str, Any] = {
+SERVICE_TYPE_REGION_INFORMATION_ERROR_ASSOCIATIONS: dict[str, Any] = {
     "iam": {
         "error_message": "IAM resource {resource} cannot contain region information."
     },
@@ -67,7 +68,7 @@ SERVICE_TYPE_REGION_INFORMATION_ERROR_ASSOCIATIONS: Dict[str, Any] = {
 }
 
 
-VALID_RESOURCE_PATH_STARTING_VALUES: Dict[str, Any] = {
+VALID_RESOURCE_PATH_STARTING_VALUES: dict[str, Any] = {
     "iam": {
         "values": [
             "user/",
@@ -92,8 +93,8 @@ VALID_RESOURCE_PATH_STARTING_VALUES: Dict[str, Any] = {
 class BaseIAMPolicyValidator:
     def __init__(self, policy_document: str):
         self._policy_document = policy_document
-        self._policy_json: Dict[str, Any] = {}
-        self._statements: List[Dict[str, Any]] = []
+        self._policy_json: dict[str, Any] = {}
+        self._statements: list[dict[str, Any]] = []
         self._resource_error = ""  # the first resource error found that does not generate a legacy parsing error
 
     def validate(self) -> None:
@@ -173,7 +174,7 @@ class BaseIAMPolicyValidator:
             self._validate_statement_syntax(statement)
 
     @staticmethod
-    def _validate_statement_syntax(statement: Dict[str, Any]) -> None:  # type: ignore[misc]
+    def _validate_statement_syntax(statement: dict[str, Any]) -> None:  # type: ignore[misc]
         assert isinstance(statement, dict)
         for statement_element in statement.keys():
             assert statement_element in VALID_STATEMENT_ELEMENTS
@@ -190,7 +191,7 @@ class BaseIAMPolicyValidator:
         IAMPolicyDocumentValidator._validate_sid_syntax(statement)
 
     @staticmethod
-    def _validate_effect_syntax(statement: Dict[str, Any]) -> None:  # type: ignore[misc]
+    def _validate_effect_syntax(statement: dict[str, Any]) -> None:  # type: ignore[misc]
         assert "Effect" in statement
         assert isinstance(statement["Effect"], str)
         assert statement["Effect"].lower() in [
@@ -198,48 +199,48 @@ class BaseIAMPolicyValidator:
         ]
 
     @staticmethod
-    def _validate_action_syntax(statement: Dict[str, Any]) -> None:  # type: ignore[misc]
+    def _validate_action_syntax(statement: dict[str, Any]) -> None:  # type: ignore[misc]
         IAMPolicyDocumentValidator._validate_string_or_list_of_strings_syntax(
             statement, "Action"
         )
 
     @staticmethod
-    def _validate_not_action_syntax(statement: Dict[str, Any]) -> None:  # type: ignore[misc]
+    def _validate_not_action_syntax(statement: dict[str, Any]) -> None:  # type: ignore[misc]
         IAMPolicyDocumentValidator._validate_string_or_list_of_strings_syntax(
             statement, "NotAction"
         )
 
     @staticmethod
-    def _validate_resource_syntax(statement: Dict[str, Any]) -> None:  # type: ignore[misc]
+    def _validate_resource_syntax(statement: dict[str, Any]) -> None:  # type: ignore[misc]
         IAMPolicyDocumentValidator._validate_string_or_list_of_strings_syntax(
             statement, "Resource"
         )
 
     @staticmethod
-    def _validate_not_resource_syntax(statement: Dict[str, Any]) -> None:  # type: ignore[misc]
+    def _validate_not_resource_syntax(statement: dict[str, Any]) -> None:  # type: ignore[misc]
         IAMPolicyDocumentValidator._validate_string_or_list_of_strings_syntax(
             statement, "NotResource"
         )
 
     @staticmethod
     def _validate_string_or_list_of_strings_syntax(  # type: ignore[misc]
-        statement: Dict[str, Any],
+        statement: dict[str, Any],
         key: str,
     ) -> None:
         if key in statement:
             assert isinstance(statement[key], (str, list))
             if isinstance(statement[key], list):
                 for resource in statement[key]:
-                    assert isinstance(resource, str)
+                    assert resource is None or isinstance(resource, str)
 
     @staticmethod
-    def _validate_condition_syntax(statement: Dict[str, Any]) -> None:  # type: ignore[misc]
+    def _validate_condition_syntax(statement: dict[str, Any]) -> None:  # type: ignore[misc]
         if "Condition" in statement:
             assert isinstance(statement["Condition"], dict)
             for condition_key, condition_value in statement["Condition"].items():
                 assert isinstance(condition_value, dict)
                 for condition_element_value in condition_value.values():
-                    assert isinstance(condition_element_value, (list, str))
+                    assert isinstance(condition_element_value, (bool, list, str))
 
                 if (
                     IAMPolicyDocumentValidator._strip_condition_key(condition_key)
@@ -262,7 +263,7 @@ class BaseIAMPolicyValidator:
         return condition_key
 
     @staticmethod
-    def _validate_sid_syntax(statement: Dict[str, Any]) -> None:  # type: ignore[misc]
+    def _validate_sid_syntax(statement: dict[str, Any]) -> None:  # type: ignore[misc]
         if "Sid" in statement:
             assert isinstance(statement["Sid"], str)
 
@@ -331,7 +332,9 @@ class BaseIAMPolicyValidator:
                 if isinstance(statement[key], str):
                     self._validate_resource_format(statement[key])
                 else:
-                    for resource in sorted(statement[key], reverse=True):
+                    # Skip validation of None elements
+                    resources = [r for r in statement[key] if r]
+                    for resource in sorted(resources, reverse=True):
                         self._validate_resource_format(resource)
                 if self._resource_error == "":
                     IAMPolicyDocumentValidator._legacy_parse_resource_like(
@@ -349,7 +352,10 @@ class BaseIAMPolicyValidator:
                 return
 
             resource_partitions = resource_partitions[2].partition(":")
-            if resource_partitions[0] not in ["aws", "*"]:
+            if (
+                resource_partitions[0] != "*"
+                and resource_partitions[0] not in PARTITION_NAMES
+            ):
                 remaining_resource_parts = resource_partitions[2].split(":")
 
                 arn1 = (
@@ -436,7 +442,7 @@ class BaseIAMPolicyValidator:
             self._legacy_parse_statement(statement)
 
     @staticmethod
-    def _legacy_parse_statement(statement: Dict[str, Any]) -> None:  # type: ignore[misc]
+    def _legacy_parse_statement(statement: dict[str, Any]) -> None:  # type: ignore[misc]
         assert statement["Effect"] in VALID_EFFECTS  # case-sensitive matching
         if "Condition" in statement:
             for condition_key, condition_value in statement["Condition"].items():
@@ -445,21 +451,21 @@ class BaseIAMPolicyValidator:
                 )
 
     @staticmethod
-    def _legacy_parse_resource_like(statement: Dict[str, Any], key: str) -> None:  # type: ignore[misc]
+    def _legacy_parse_resource_like(statement: dict[str, Any], key: str) -> None:  # type: ignore[misc]
         if isinstance(statement[key], str):
             if statement[key] != "*":
                 assert statement[key].count(":") >= 5 or "::" not in statement[key]
                 assert statement[key].split(":")[2] != ""
         else:  # list
             for resource in statement[key]:
-                if resource != "*":
+                if resource and resource != "*":
                     assert resource.count(":") >= 5 or "::" not in resource
                     assert resource[2] != ""
 
     @staticmethod
     def _legacy_parse_condition(  # type: ignore[misc]
         condition_key: str,
-        condition_value: Dict[str, Any],
+        condition_value: dict[str, Any],
     ) -> None:
         stripped_condition_key = IAMPolicyDocumentValidator._strip_condition_key(
             condition_key

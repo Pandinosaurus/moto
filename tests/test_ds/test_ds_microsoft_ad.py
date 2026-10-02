@@ -227,3 +227,131 @@ def test_ds_get_microsoft_ad_directory_limits():
     assert limits["CloudOnlyMicrosoftADLimitReached"]
     assert not limits["ConnectedDirectoriesLimitReached"]
     assert not limits["CloudOnlyDirectoriesCurrentCount"]
+
+
+@mock_aws
+def test_enable_describe_disable_ldaps():
+    """Test good and bad invocations of describe_directories()."""
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_microsoft_ad(client, ec2_client)
+
+    # Describe LDAPS settings for Microsoft AD without LDAPS enabled
+    ldaps = client.describe_ldaps_settings(DirectoryId=directory_id)[
+        "LDAPSSettingsInfo"
+    ]
+    assert ldaps == []
+
+    # Enable LDAPS for Microsoft AD and verify it is enabled
+    client.enable_ldaps(DirectoryId=directory_id, Type="Client")
+    ldaps = client.describe_ldaps_settings(DirectoryId=directory_id)[
+        "LDAPSSettingsInfo"
+    ]
+    assert len(ldaps) == 1
+    assert ldaps[0]["LDAPSStatus"] == "Enabled"
+
+    # Disable LDAPS for Microsoft AD and verify it is disabled
+    client.disable_ldaps(DirectoryId=directory_id, Type="Client")
+    ldaps = client.describe_ldaps_settings(DirectoryId=directory_id)[
+        "LDAPSSettingsInfo"
+    ]
+    assert len(ldaps) == 1
+    assert ldaps[0]["LDAPSStatus"] == "Disabled"
+
+
+@mock_aws
+def test_describe_settings():
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+    directory_id = create_test_microsoft_ad(client, ec2_client)
+
+    # Describe the settings for a Microsoft AD directory
+    settings = client.describe_settings(DirectoryId=directory_id)["SettingEntries"]
+    assert len(settings) > 0
+    assert "TLS_1_0" in [s["Name"] for s in settings]
+
+
+@mock_aws
+def test_update_settings():
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+    directory_id = create_test_microsoft_ad(client, ec2_client)
+
+    # Check the current setting for TLS 1.0
+    directory_settings = client.describe_settings(DirectoryId=directory_id)[
+        "SettingEntries"
+    ]
+    tls_1_0_setting = next(
+        (s for s in directory_settings if s["Name"] == "TLS_1_0"), None
+    )
+    assert tls_1_0_setting["AppliedValue"] == "Enable"
+
+    new_setting = {"Name": "TLS_1_0", "Value": "Disable"}
+    client.update_settings(DirectoryId=directory_id, Settings=[new_setting])
+
+    # Check the updated setting for TLS 1.0
+    new_directory_settings = client.describe_settings(DirectoryId=directory_id)[
+        "SettingEntries"
+    ]
+    new_tls_1_0_setting = next(
+        (s for s in new_directory_settings if s["Name"] == "TLS_1_0"), None
+    )
+    assert new_tls_1_0_setting["AppliedValue"] == "Disable"
+
+
+@mock_aws
+def test_enable_radius():
+    """Test enabling RADIUS for MicrosoftAD and verifying settings are stored."""
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_microsoft_ad(client, ec2_client)
+
+    radius_settings = {
+        "RadiusServers": ["10.0.0.1"],
+        "RadiusPort": 1812,
+        "RadiusTimeout": 30,
+        "RadiusRetries": 3,
+        "SharedSecret": "supersecret",
+        "AuthenticationProtocol": "MS-CHAPv2",
+        "DisplayLabel": "MFA",
+        "UseSameUsername": True,
+    }
+    client.enable_radius(DirectoryId=directory_id, RadiusSettings=radius_settings)
+
+    directory = client.describe_directories(DirectoryIds=[directory_id])[
+        "DirectoryDescriptions"
+    ][0]
+    assert directory["RadiusStatus"] == "Completed"
+    assert directory["RadiusSettings"]["RadiusServers"] == ["10.0.0.1"]
+    assert directory["RadiusSettings"]["RadiusPort"] == 1812
+    assert directory["RadiusSettings"]["AuthenticationProtocol"] == "MS-CHAPv2"
+
+
+@mock_aws
+def test_disable_radius():
+    """Test disabling RADIUS after enabling it for MicrosoftAD."""
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_microsoft_ad(client, ec2_client)
+
+    radius_settings = {
+        "RadiusServers": ["10.0.0.1"],
+        "RadiusPort": 1812,
+        "RadiusTimeout": 30,
+        "RadiusRetries": 3,
+        "SharedSecret": "supersecret",
+        "AuthenticationProtocol": "MS-CHAPv2",
+        "DisplayLabel": "MFA",
+        "UseSameUsername": True,
+    }
+    client.enable_radius(DirectoryId=directory_id, RadiusSettings=radius_settings)
+    client.disable_radius(DirectoryId=directory_id)
+
+    directory = client.describe_directories(DirectoryIds=[directory_id])[
+        "DirectoryDescriptions"
+    ][0]
+    assert "RadiusStatus" not in directory
+    assert directory["RadiusSettings"] == {}

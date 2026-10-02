@@ -9,7 +9,8 @@ name: "DataUpdate_EC2InstanceTypes"
 
 on:
   schedule:
-    - cron: '00 8 * * 0'
+    - cron: '00 8 1 * *'
+  workflow_dispatch:
 
 jobs:
   update:
@@ -23,25 +24,25 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
-    - name: Set up Python 3.9
-      uses: actions/setup-python@v5
+    - name: Set up Python
+      uses: actions/setup-python@v7
       with:
-        python-version: 3.9
+        python-version: 3.14
 
     - name: Configure AWS
-      uses: aws-actions/configure-aws-credentials@v4
+      uses: aws-actions/configure-aws-credentials@v6
       with:
         aws-region: us-east-1
-        role-to-assume: arn:aws:iam::486285699788:role/GithubActionsRole
+        role-to-assume: arn:aws:iam::682283128318:role/GithubActionsRole
 
     - name: Pull EC2 instance types from AWS
       run: |
         pip install boto3
         scripts/get_instance_info.py
     - name: Create PR
-      uses: peter-evans/create-pull-request@v6
+      uses: peter-evans/create-pull-request@v8
       with:
         branch: 'chore-update-ec2-types-${{ github.run_number }}'
         title: 'chore: update EC2 Instance Types'

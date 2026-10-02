@@ -142,3 +142,49 @@ def test_principal_thing():
         e.value.response["Error"]["Message"]
         == "Failed to list principals for thing xxx because the thing does not exist in your account"
     )
+
+
+@mock_aws
+def test_list_thing_principals_v2():
+    # 1. Setup
+    client = boto3.client("iot", region_name="us-east-1")
+    thing_name = "my-test-thing"
+    client.create_thing(thingName=thing_name)
+
+    # 2. Create a credential and bind it to Thing.
+    cert = client.create_keys_and_certificate(setAsActive=True)
+    cert_arn = cert["certificateArn"]
+    client.attach_thing_principal(thingName=thing_name, principal=cert_arn)
+
+    # 3. Call our written V2 API
+    response = client.list_thing_principals_v2(thingName=thing_name)
+
+    # 4. Verification of returned results
+    assert "thingPrincipalObjects" in response
+    results = response["thingPrincipalObjects"]
+    assert len(results) == 1
+
+    # [Crucial] Verify that it is in V2 format (it is a Dictionary, not a String).
+    assert isinstance(results[0], dict)
+
+    # Verify if Principal is correct.
+    assert results[0]["principal"] == cert_arn
+
+
+@mock_aws
+def test_list_principal_things_v2():
+    client = boto3.client("iot", region_name="us-east-1")
+    thing_name = "my-test-thing"
+    client.create_thing(thingName=thing_name)
+
+    cert = client.create_keys_and_certificate(setAsActive=True)
+    cert_arn = cert["certificateArn"]
+    client.attach_thing_principal(thingName=thing_name, principal=cert_arn)
+
+    response = client.list_principal_things_v2(principal=cert_arn)
+
+    assert "principalThingObjects" in response
+    results = response["principalThingObjects"]
+    assert len(results) == 1
+    assert isinstance(results[0], dict)
+    assert results[0]["thingName"] == thing_name

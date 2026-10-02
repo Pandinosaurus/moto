@@ -14,6 +14,7 @@ glue
 
 |start-h3| Implemented features for this service |end-h3|
 
+- [ ] associate_glossary_terms
 - [X] batch_create_partition
 - [ ] batch_delete_connection
 - [X] batch_delete_partition
@@ -23,12 +24,15 @@ glue
 - [X] batch_get_crawlers
 - [ ] batch_get_custom_entity_types
 - [ ] batch_get_data_quality_result
+- [ ] batch_get_data_quality_ruleset_evaluation_run
 - [ ] batch_get_dev_endpoints
+- [ ] batch_get_iterable_forms
 - [X] batch_get_jobs
 - [X] batch_get_partition
 - [ ] batch_get_table_optimizer
 - [X] batch_get_triggers
 - [ ] batch_get_workflows
+- [ ] batch_put_data_quality_statistic_annotation
 - [ ] batch_stop_job_run
 - [X] batch_update_partition
 - [ ] cancel_data_quality_rule_recommendation_run
@@ -37,74 +41,111 @@ glue
 - [ ] cancel_statement
 - [ ] check_schema_version_validity
 - [ ] create_blueprint
+- [ ] create_catalog
 - [ ] create_classifier
-- [ ] create_connection
+- [ ] create_column_statistics_task_settings
+- [X] create_connection
 - [X] create_crawler
 - [ ] create_custom_entity_type
 - [ ] create_data_quality_ruleset
 - [X] create_database
-- [ ] create_dev_endpoint
+- [X] create_dev_endpoint
+- [ ] create_glossary
+- [ ] create_glossary_term
+- [ ] create_glue_identity_center_configuration
+- [ ] create_integration
+- [ ] create_integration_resource_property
+- [ ] create_integration_table_properties
 - [X] create_job
-- [ ] create_ml_transform
+- [X] create_ml_transform
 - [X] create_partition
 - [ ] create_partition_index
 - [X] create_registry
 - [X] create_schema
   
-        The following parameters/features are not yet implemented: Glue Schema Registry: compatibility checks NONE | BACKWARD | BACKWARD_ALL | FORWARD | FORWARD_ALL | FULL | FULL_ALL and  Data format parsing and syntax validation.
-        
+The following parameters/features are not yet implemented: Glue Schema Registry: compatibility checks NONE | BACKWARD | BACKWARD_ALL | FORWARD | FORWARD_ALL | FULL | FULL_ALL and  Data format parsing and syntax validation.
+
 
 - [ ] create_script
-- [ ] create_security_configuration
+- [X] create_security_configuration
 - [X] create_session
 - [X] create_table
 - [ ] create_table_optimizer
 - [X] create_trigger
+- [ ] create_usage_profile
 - [ ] create_user_defined_function
-- [ ] create_workflow
+- [X] create_workflow
+- [ ] delete_asset
+- [ ] delete_asset_type
+- [ ] delete_attachment
 - [ ] delete_blueprint
+- [ ] delete_catalog
 - [ ] delete_classifier
 - [ ] delete_column_statistics_for_partition
 - [ ] delete_column_statistics_for_table
+- [ ] delete_column_statistics_task_settings
 - [ ] delete_connection
+- [ ] delete_connection_type
 - [X] delete_crawler
 - [ ] delete_custom_entity_type
 - [ ] delete_data_quality_ruleset
 - [X] delete_database
-- [ ] delete_dev_endpoint
+- [X] delete_dev_endpoint
+- [ ] delete_form_type
+- [ ] delete_glossary
+- [ ] delete_glossary_term
+- [ ] delete_glue_identity_center_configuration
+- [ ] delete_integration
+- [ ] delete_integration_resource_property
+- [ ] delete_integration_table_properties
 - [X] delete_job
-- [ ] delete_ml_transform
+- [X] delete_ml_transform
 - [X] delete_partition
 - [ ] delete_partition_index
 - [X] delete_registry
-- [ ] delete_resource_policy
+- [X] delete_resource_policy
 - [X] delete_schema
 - [ ] delete_schema_versions
-- [ ] delete_security_configuration
+- [X] delete_security_configuration
 - [X] delete_session
 - [X] delete_table
 - [ ] delete_table_optimizer
 - [X] delete_table_version
 - [X] delete_trigger
+- [ ] delete_usage_profile
 - [ ] delete_user_defined_function
-- [ ] delete_workflow
+- [X] delete_workflow
+- [ ] describe_connection_type
+- [ ] describe_entity
+- [ ] describe_inbound_integrations
+- [ ] describe_integrations
+- [ ] disassociate_glossary_terms
+- [ ] get_asset
+- [ ] get_asset_type
 - [ ] get_blueprint
 - [ ] get_blueprint_run
 - [ ] get_blueprint_runs
+- [ ] get_catalog
 - [ ] get_catalog_import_status
+- [ ] get_catalogs
 - [ ] get_classifier
 - [ ] get_classifiers
 - [ ] get_column_statistics_for_partition
 - [ ] get_column_statistics_for_table
 - [ ] get_column_statistics_task_run
 - [ ] get_column_statistics_task_runs
-- [ ] get_connection
-- [ ] get_connections
+- [ ] get_column_statistics_task_settings
+- [X] get_connection
+- [X] get_connections
 - [X] get_crawler
 - [ ] get_crawler_metrics
 - [X] get_crawlers
 - [ ] get_custom_entity_type
-- [ ] get_data_catalog_encryption_settings
+- [ ] get_dashboard_url
+- [X] get_data_catalog_encryption_settings
+- [ ] get_data_catalog_export_configuration
+- [ ] get_data_quality_model
+- [ ] get_data_quality_model_result
 - [ ] get_data_quality_result
 - [ ] get_data_quality_rule_recommendation_run
 - [ ] get_data_quality_ruleset
@@ -112,44 +153,55 @@ glue
 - [X] get_database
 - [X] get_databases
 - [ ] get_dataflow_graph
-- [ ] get_dev_endpoint
-- [ ] get_dev_endpoints
+- [X] get_dev_endpoint
+- [X] get_dev_endpoints
+- [ ] get_entity_records
+- [ ] get_form_type
+- [ ] get_glossary
+- [ ] get_glossary_term
+- [ ] get_glue_identity_center_configuration
+- [ ] get_integration_resource_property
+- [ ] get_integration_table_properties
 - [X] get_job
 - [ ] get_job_bookmark
 - [X] get_job_run
-- [ ] get_job_runs
+- [X] get_job_runs
 - [X] get_jobs
 - [ ] get_mapping
+- [ ] get_materialized_view_refresh_task_run
 - [ ] get_ml_task_run
 - [ ] get_ml_task_runs
-- [ ] get_ml_transform
-- [ ] get_ml_transforms
+- [X] get_ml_transform
+- [X] get_ml_transforms
 - [X] get_partition
 - [ ] get_partition_indexes
 - [X] get_partitions
   
-        See https://docs.aws.amazon.com/glue/latest/webapi/API_GetPartitions.html
-        for supported expressions.
+See https://docs.aws.amazon.com/glue/latest/webapi/API_GetPartitions.html
+for supported expressions.
 
-        Expression caveats:
+Expression caveats:
 
-        - Column names must consist of UPPERCASE, lowercase, dots and underscores only.
-        - Literal dates and timestamps must be valid, i.e. no support for February 31st.
-        - LIKE expressions are converted to Python regexes, escaping special characters.
-          Only % and _ wildcards are supported, and SQL escaping using [] does not work.
-        
+- Column names must consist of UPPERCASE, lowercase, dots and underscores only.
+- Literal dates and timestamps must be valid, i.e. no support for February 31st.
+- LIKE expressions are converted to Python regexes, escaping special characters.
+  Only % and _ wildcards are supported, and SQL escaping using [] does not work.
+
 
 - [ ] get_plan
 - [X] get_registry
 - [ ] get_resource_policies
-- [ ] get_resource_policy
+- [X] get_resource_policy
 - [X] get_schema
 - [X] get_schema_by_definition
 - [X] get_schema_version
 - [ ] get_schema_versions_diff
-- [ ] get_security_configuration
-- [ ] get_security_configurations
+- [X] get_security_configuration
+- [X] get_security_configurations
+  Pagination is not yet implemented
+
 - [X] get_session
+- [ ] get_session_endpoint
 - [ ] get_statement
 - [X] get_table
 - [ ] get_table_optimizer
@@ -162,24 +214,36 @@ glue
 - [ ] get_unfiltered_partition_metadata
 - [ ] get_unfiltered_partitions_metadata
 - [ ] get_unfiltered_table_metadata
+- [ ] get_usage_profile
 - [ ] get_user_defined_function
 - [ ] get_user_defined_functions
-- [ ] get_workflow
-- [ ] get_workflow_run
-- [ ] get_workflow_run_properties
-- [ ] get_workflow_runs
+- [X] get_workflow
+- [X] get_workflow_run
+- [X] get_workflow_run_properties
+- [X] get_workflow_runs
 - [ ] import_catalog_to_glue
+- [ ] list_asset_types
 - [ ] list_blueprints
 - [ ] list_column_statistics_task_runs
+- [ ] list_connection_types
 - [X] list_crawlers
-- [ ] list_crawls
+- [X] list_crawls
 - [ ] list_custom_entity_types
 - [ ] list_data_quality_results
 - [ ] list_data_quality_rule_recommendation_runs
 - [ ] list_data_quality_ruleset_evaluation_runs
 - [ ] list_data_quality_rulesets
+- [ ] list_data_quality_statistic_annotations
+- [ ] list_data_quality_statistics
 - [ ] list_dev_endpoints
+- [ ] list_entities
+- [ ] list_form_types
+- [ ] list_glossaries
+- [ ] list_glossary_terms
+- [ ] list_integration_resource_properties
+- [ ] list_iterable_forms
 - [X] list_jobs
+- [ ] list_materialized_view_refresh_task_runs
 - [ ] list_ml_transforms
 - [X] list_registries
 - [ ] list_schema_versions
@@ -188,20 +252,31 @@ glue
 - [ ] list_statements
 - [ ] list_table_optimizer_runs
 - [X] list_triggers
-- [ ] list_workflows
-- [ ] put_data_catalog_encryption_settings
-- [ ] put_resource_policy
+- [ ] list_usage_profiles
+- [X] list_workflows
+- [ ] modify_integration
+- [ ] put_asset
+- [ ] put_asset_type
+- [ ] put_attachment
+- [X] put_data_catalog_encryption_settings
+- [ ] put_data_catalog_export_configuration
+- [ ] put_data_quality_profile_annotation
+- [ ] put_form_type
+- [X] put_resource_policy
 - [X] put_schema_version_metadata
-- [ ] put_workflow_run_properties
+- [X] put_workflow_run_properties
 - [ ] query_schema_version_metadata
+- [ ] register_connection_type
 - [X] register_schema_version
 - [ ] remove_schema_version_metadata
 - [ ] reset_job_bookmark
 - [ ] resume_workflow_run
 - [ ] run_statement
+- [ ] search_assets
 - [ ] search_tables
 - [ ] start_blueprint_run
 - [ ] start_column_statistics_task_run
+- [ ] start_column_statistics_task_run_schedule
 - [X] start_crawler
 - [ ] start_crawler_schedule
 - [ ] start_data_quality_rule_recommendation_run
@@ -209,28 +284,40 @@ glue
 - [ ] start_export_labels_task_run
 - [ ] start_import_labels_task_run
 - [X] start_job_run
+- [ ] start_materialized_view_refresh_task_run
 - [ ] start_ml_evaluation_task_run
 - [ ] start_ml_labeling_set_generation_task_run
 - [X] start_trigger
-- [ ] start_workflow_run
+- [X] start_workflow_run
 - [ ] stop_column_statistics_task_run
+- [ ] stop_column_statistics_task_run_schedule
 - [X] stop_crawler
 - [ ] stop_crawler_schedule
+- [ ] stop_materialized_view_refresh_task_run
 - [X] stop_session
 - [X] stop_trigger
-- [ ] stop_workflow_run
+- [X] stop_workflow_run
 - [X] tag_resource
+- [ ] test_connection
 - [X] untag_resource
+- [ ] update_asset
 - [ ] update_blueprint
+- [ ] update_catalog
 - [ ] update_classifier
 - [ ] update_column_statistics_for_partition
 - [ ] update_column_statistics_for_table
+- [ ] update_column_statistics_task_settings
 - [ ] update_connection
 - [ ] update_crawler
 - [ ] update_crawler_schedule
 - [ ] update_data_quality_ruleset
 - [X] update_database
 - [ ] update_dev_endpoint
+- [ ] update_glossary
+- [ ] update_glossary_term
+- [ ] update_glue_identity_center_configuration
+- [ ] update_integration_resource_property
+- [ ] update_integration_table_properties
 - [ ] update_job
 - [ ] update_job_from_source_control
 - [ ] update_ml_transform
@@ -238,13 +325,14 @@ glue
 - [ ] update_registry
 - [X] update_schema
   
-        The SchemaVersionNumber-argument is not yet implemented
-        
+The SchemaVersionNumber-argument is not yet implemented
+
 
 - [ ] update_source_control_from_job
 - [X] update_table
 - [ ] update_table_optimizer
 - [ ] update_trigger
+- [ ] update_usage_profile
 - [ ] update_user_defined_function
-- [ ] update_workflow
+- [X] update_workflow
 

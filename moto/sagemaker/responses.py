@@ -1,8 +1,6 @@
-import json
 from typing import Any
 
-from moto.core.common_types import TYPE_RESPONSE
-from moto.core.responses import BaseResponse
+from moto.core.responses import ActionResult, BaseResponse, EmptyResult
 from moto.sagemaker.exceptions import AWSValidationException
 
 from .models import SageMakerModelBackend, sagemaker_backends
@@ -15,17 +13,18 @@ def format_enum_error(value: str, attribute: str, allowed: Any) -> str:
 class SageMakerResponse(BaseResponse):
     def __init__(self) -> None:
         super().__init__(service_name="sagemaker")
+        self.automated_parameter_parsing = True
 
     @property
     def sagemaker_backend(self) -> SageMakerModelBackend:
         return sagemaker_backends[self.current_account][self.region]
 
-    def describe_model(self) -> str:
+    def describe_model(self) -> ActionResult:
         model_name = self._get_param("ModelName")
         model = self.sagemaker_backend.describe_model(model_name)
-        return json.dumps(model.response_object)
+        return ActionResult(model.response_object)
 
-    def create_model(self) -> str:
+    def create_model(self) -> ActionResult:
         model_name = self._get_param("ModelName")
         execution_role_arn = self._get_param("ExecutionRoleArn")
         primary_container = self._get_param("PrimaryContainer")
@@ -40,18 +39,18 @@ class SageMakerResponse(BaseResponse):
             containers=containers,
             tags=tags,
         )
-        return json.dumps(model.response_create)
+        return ActionResult(model.response_create)
 
-    def delete_model(self) -> str:
+    def delete_model(self) -> ActionResult:
         model_name = self._get_param("ModelName")
         self.sagemaker_backend.delete_model(model_name)
-        return "{}"
+        return EmptyResult()
 
-    def list_models(self) -> str:
+    def list_models(self) -> ActionResult:
         models = self.sagemaker_backend.list_models()
-        return json.dumps({"Models": [model.response_object for model in models]})
+        return ActionResult({"Models": [model.response_object for model in models]})
 
-    def create_notebook_instance(self) -> TYPE_RESPONSE:
+    def create_notebook_instance(self) -> ActionResult:
         sagemaker_notebook = self.sagemaker_backend.create_notebook_instance(
             notebook_instance_name=self._get_param("NotebookInstanceName"),
             instance_type=self._get_param("InstanceType"),
@@ -68,31 +67,31 @@ class SageMakerResponse(BaseResponse):
             additional_code_repositories=self._get_param("AdditionalCodeRepositories"),
             root_access=self._get_param("RootAccess"),
         )
-        return 200, {}, json.dumps({"NotebookInstanceArn": sagemaker_notebook.arn})
+        return ActionResult({"NotebookInstanceArn": sagemaker_notebook.arn})
 
-    def describe_notebook_instance(self) -> str:
+    def describe_notebook_instance(self) -> ActionResult:
         notebook_instance_name = self._get_param("NotebookInstanceName")
         notebook_instance = self.sagemaker_backend.get_notebook_instance(
             notebook_instance_name
         )
-        return json.dumps(notebook_instance.to_dict())
+        return ActionResult(notebook_instance.to_dict())
 
-    def start_notebook_instance(self) -> TYPE_RESPONSE:
+    def start_notebook_instance(self) -> ActionResult:
         notebook_instance_name = self._get_param("NotebookInstanceName")
         self.sagemaker_backend.start_notebook_instance(notebook_instance_name)
-        return 200, {}, json.dumps("{}")
+        return EmptyResult()
 
-    def stop_notebook_instance(self) -> TYPE_RESPONSE:
+    def stop_notebook_instance(self) -> ActionResult:
         notebook_instance_name = self._get_param("NotebookInstanceName")
         self.sagemaker_backend.stop_notebook_instance(notebook_instance_name)
-        return 200, {}, json.dumps("{}")
+        return EmptyResult()
 
-    def delete_notebook_instance(self) -> TYPE_RESPONSE:
+    def delete_notebook_instance(self) -> ActionResult:
         notebook_instance_name = self._get_param("NotebookInstanceName")
         self.sagemaker_backend.delete_notebook_instance(notebook_instance_name)
-        return 200, {}, json.dumps("{}")
+        return EmptyResult()
 
-    def list_notebook_instances(self) -> str:
+    def list_notebook_instances(self) -> ActionResult:
         sort_by = self._get_param("SortBy", "Name")
         sort_order = self._get_param("SortOrder", "Ascending")
         name_contains = self._get_param("NameContains")
@@ -107,80 +106,75 @@ class SageMakerResponse(BaseResponse):
             max_results=max_results,
             next_token=next_token,
         )
-        return json.dumps(
+        return ActionResult(
             {
                 "NotebookInstances": [i.to_dict() for i in instances],
                 "NextToken": next_token,
             }
         )
 
-    def list_tags(self) -> TYPE_RESPONSE:
+    def list_tags(self) -> ActionResult:
         arn = self._get_param("ResourceArn")
         max_results = self._get_param("MaxResults")
         next_token = self._get_param("NextToken")
         paged_results, next_token = self.sagemaker_backend.list_tags(
             arn=arn, MaxResults=max_results, NextToken=next_token
         )
-        response = {"Tags": paged_results}
-        if next_token:
-            response["NextToken"] = next_token
-        return 200, {}, json.dumps(response)
+        response = {"Tags": paged_results, "NextToken": next_token}
+        return ActionResult(response)
 
-    def add_tags(self) -> TYPE_RESPONSE:
+    def add_tags(self) -> ActionResult:
         arn = self._get_param("ResourceArn")
         tags = self._get_param("Tags")
         tags = self.sagemaker_backend.add_tags(arn, tags)
-        return 200, {}, json.dumps({"Tags": tags})
+        return ActionResult({"Tags": tags})
 
-    def delete_tags(self) -> TYPE_RESPONSE:
+    def delete_tags(self) -> ActionResult:
         arn = self._get_param("ResourceArn")
         tag_keys = self._get_param("TagKeys")
         self.sagemaker_backend.delete_tags(arn, tag_keys)
-        return 200, {}, json.dumps({})
+        return EmptyResult()
 
-    def create_endpoint_config(self) -> TYPE_RESPONSE:
+    def create_endpoint_config(self) -> ActionResult:
         endpoint_config = self.sagemaker_backend.create_endpoint_config(
             endpoint_config_name=self._get_param("EndpointConfigName"),
+            async_inference_config=self._get_param("AsyncInferenceConfig"),
             production_variants=self._get_param("ProductionVariants"),
             data_capture_config=self._get_param("DataCaptureConfig"),
             tags=self._get_param("Tags"),
             kms_key_id=self._get_param("KmsKeyId"),
         )
-        return (
-            200,
-            {},
-            json.dumps({"EndpointConfigArn": endpoint_config.endpoint_config_arn}),
-        )
+        return ActionResult({"EndpointConfigArn": endpoint_config.endpoint_config_arn})
 
-    def describe_endpoint_config(self) -> str:
+    def describe_endpoint_config(self) -> ActionResult:
         endpoint_config_name = self._get_param("EndpointConfigName")
         response = self.sagemaker_backend.describe_endpoint_config(endpoint_config_name)
-        return json.dumps(response)
+        return ActionResult(response)
 
-    def delete_endpoint_config(self) -> TYPE_RESPONSE:
+    def delete_endpoint_config(self) -> ActionResult:
         endpoint_config_name = self._get_param("EndpointConfigName")
         self.sagemaker_backend.delete_endpoint_config(endpoint_config_name)
-        return 200, {}, json.dumps("{}")
+        return EmptyResult()
 
-    def create_endpoint(self) -> TYPE_RESPONSE:
+    def create_endpoint(self) -> ActionResult:
         endpoint = self.sagemaker_backend.create_endpoint(
             endpoint_name=self._get_param("EndpointName"),
             endpoint_config_name=self._get_param("EndpointConfigName"),
             tags=self._get_param("Tags"),
         )
-        return 200, {}, json.dumps({"EndpointArn": endpoint.endpoint_arn})
+        return ActionResult({"EndpointArn": endpoint.arn})
 
-    def describe_endpoint(self) -> str:
+    def describe_endpoint(self) -> ActionResult:
         endpoint_name = self._get_param("EndpointName")
         response = self.sagemaker_backend.describe_endpoint(endpoint_name)
-        return json.dumps(response)
+        return ActionResult(response)
 
-    def delete_endpoint(self) -> TYPE_RESPONSE:
+    def delete_endpoint(self) -> ActionResult:
         endpoint_name = self._get_param("EndpointName")
         self.sagemaker_backend.delete_endpoint(endpoint_name)
-        return 200, {}, json.dumps("{}")
+        return EmptyResult()
 
-    def create_processing_job(self) -> TYPE_RESPONSE:
+    def create_processing_job(self) -> ActionResult:
         processing_job = self.sagemaker_backend.create_processing_job(
             app_specification=self._get_param("AppSpecification"),
             experiment_config=self._get_param("ExperimentConfig"),
@@ -192,15 +186,20 @@ class SageMakerResponse(BaseResponse):
             stopping_condition=self._get_param("StoppingCondition"),
             tags=self._get_param("Tags"),
         )
-        response = {"ProcessingJobArn": processing_job.processing_job_arn}
-        return 200, {}, json.dumps(response)
+        response = {"ProcessingJobArn": processing_job.arn}
+        return ActionResult(response)
 
-    def describe_processing_job(self) -> str:
+    def describe_processing_job(self) -> ActionResult:
         processing_job_name = self._get_param("ProcessingJobName")
         response = self.sagemaker_backend.describe_processing_job(processing_job_name)
-        return json.dumps(response)
+        return ActionResult(response)
 
-    def create_transform_job(self) -> TYPE_RESPONSE:
+    def stop_processing_job(self) -> ActionResult:
+        processing_job_name = self._get_param("ProcessingJobName")
+        self.sagemaker_backend.stop_processing_job(processing_job_name)
+        return EmptyResult()
+
+    def create_transform_job(self) -> ActionResult:
         transform_job = self.sagemaker_backend.create_transform_job(
             transform_job_name=self._get_param("TransformJobName"),
             model_name=self._get_param("ModelName"),
@@ -218,18 +217,18 @@ class SageMakerResponse(BaseResponse):
             experiment_config=self._get_param("ExperimentConfig"),
         )
         response = {
-            "TransformJobArn": transform_job.transform_job_arn,
+            "TransformJobArn": transform_job.arn,
         }
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def describe_transform_job(self) -> str:
+    def describe_transform_job(self) -> ActionResult:
         transform_job_name = self._get_param("TransformJobName")
         response = self.sagemaker_backend.describe_transform_job(
             transform_job_name=transform_job_name
         )
-        return json.dumps(response)
+        return ActionResult(response)
 
-    def create_training_job(self) -> TYPE_RESPONSE:
+    def create_training_job(self) -> ActionResult:
         training_job = self.sagemaker_backend.create_training_job(
             training_job_name=self._get_param("TrainingJobName"),
             hyper_parameters=self._get_param("HyperParameters"),
@@ -255,16 +254,16 @@ class SageMakerResponse(BaseResponse):
             experiment_config=self._get_param("ExperimentConfig"),
         )
         response = {
-            "TrainingJobArn": training_job.training_job_arn,
+            "TrainingJobArn": training_job.arn,
         }
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def describe_training_job(self) -> str:
+    def describe_training_job(self) -> ActionResult:
         training_job_name = self._get_param("TrainingJobName")
         response = self.sagemaker_backend.describe_training_job(training_job_name)
-        return json.dumps(response)
+        return ActionResult(response)
 
-    def create_notebook_instance_lifecycle_config(self) -> TYPE_RESPONSE:
+    def create_notebook_instance_lifecycle_config(self) -> ActionResult:
         lifecycle_configuration = (
             self.sagemaker_backend.create_notebook_instance_lifecycle_config(
                 notebook_instance_lifecycle_config_name=self._get_param(
@@ -275,34 +274,34 @@ class SageMakerResponse(BaseResponse):
             )
         )
         response = {
-            "NotebookInstanceLifecycleConfigArn": lifecycle_configuration.notebook_instance_lifecycle_config_arn,
+            "NotebookInstanceLifecycleConfigArn": lifecycle_configuration.arn,
         }
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def describe_notebook_instance_lifecycle_config(self) -> str:
+    def describe_notebook_instance_lifecycle_config(self) -> ActionResult:
         response = self.sagemaker_backend.describe_notebook_instance_lifecycle_config(
             notebook_instance_lifecycle_config_name=self._get_param(
                 "NotebookInstanceLifecycleConfigName"
             )
         )
-        return json.dumps(response)
+        return ActionResult(response)
 
-    def delete_notebook_instance_lifecycle_config(self) -> TYPE_RESPONSE:
+    def delete_notebook_instance_lifecycle_config(self) -> ActionResult:
         self.sagemaker_backend.delete_notebook_instance_lifecycle_config(
             notebook_instance_lifecycle_config_name=self._get_param(
                 "NotebookInstanceLifecycleConfigName"
             )
         )
-        return 200, {}, json.dumps("{}")
+        return EmptyResult()
 
-    def search(self) -> TYPE_RESPONSE:
+    def search(self) -> ActionResult:
         response = self.sagemaker_backend.search(
             resource=self._get_param("Resource"),
             search_expression=self._get_param("SearchExpression"),
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def list_experiments(self) -> TYPE_RESPONSE:
+    def list_experiments(self) -> ActionResult:
         MaxResults = self._get_param("MaxResults")
         NextToken = self._get_param("NextToken")
 
@@ -313,7 +312,7 @@ class SageMakerResponse(BaseResponse):
         experiment_summaries = [
             {
                 "ExperimentName": experiment_data.experiment_name,
-                "ExperimentArn": experiment_data.experiment_arn,
+                "ExperimentArn": experiment_data.arn,
                 "CreationTime": experiment_data.creation_time,
                 "LastModifiedTime": experiment_data.last_modified_time,
             }
@@ -325,27 +324,27 @@ class SageMakerResponse(BaseResponse):
             "NextToken": next_token,
         }
 
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def delete_experiment(self) -> TYPE_RESPONSE:
+    def delete_experiment(self) -> ActionResult:
         self.sagemaker_backend.delete_experiment(
             experiment_name=self._get_param("ExperimentName")
         )
-        return 200, {}, json.dumps({})
+        return EmptyResult()
 
-    def create_experiment(self) -> TYPE_RESPONSE:
+    def create_experiment(self) -> ActionResult:
         response = self.sagemaker_backend.create_experiment(
             experiment_name=self._get_param("ExperimentName")
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def describe_experiment(self) -> TYPE_RESPONSE:
+    def describe_experiment(self) -> ActionResult:
         response = self.sagemaker_backend.describe_experiment(
             experiment_name=self._get_param("ExperimentName")
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def list_trials(self) -> TYPE_RESPONSE:
+    def list_trials(self) -> ActionResult:
         MaxResults = self._get_param("MaxResults")
         NextToken = self._get_param("NextToken")
 
@@ -359,7 +358,7 @@ class SageMakerResponse(BaseResponse):
         trial_summaries = [
             {
                 "TrialName": trial_data.trial_name,
-                "TrialArn": trial_data.trial_arn,
+                "TrialArn": trial_data.arn,
                 "CreationTime": trial_data.creation_time,
                 "LastModifiedTime": trial_data.last_modified_time,
             }
@@ -368,16 +367,16 @@ class SageMakerResponse(BaseResponse):
 
         response = {"TrialSummaries": trial_summaries, "NextToken": next_token}
 
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def create_trial(self) -> TYPE_RESPONSE:
+    def create_trial(self) -> ActionResult:
         response = self.sagemaker_backend.create_trial(
             trial_name=self._get_param("TrialName"),
             experiment_name=self._get_param("ExperimentName"),
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def list_trial_components(self) -> TYPE_RESPONSE:
+    def list_trial_components(self) -> ActionResult:
         MaxResults = self._get_param("MaxResults")
         NextToken = self._get_param("NextToken")
 
@@ -390,7 +389,7 @@ class SageMakerResponse(BaseResponse):
         trial_component_summaries = [
             {
                 "TrialComponentName": trial_component_data.trial_component_name,
-                "TrialComponentArn": trial_component_data.trial_component_arn,
+                "TrialComponentArn": trial_component_data.arn,
                 "CreationTime": trial_component_data.creation_time,
                 "LastModifiedTime": trial_component_data.last_modified_time,
             }
@@ -402,9 +401,9 @@ class SageMakerResponse(BaseResponse):
             "NextToken": next_token,
         }
 
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def create_trial_component(self) -> TYPE_RESPONSE:
+    def create_trial_component(self) -> ActionResult:
         response = self.sagemaker_backend.create_trial_component(
             trial_component_name=self._get_param("TrialComponentName"),
             start_time=self._get_param("StartTime"),
@@ -417,45 +416,45 @@ class SageMakerResponse(BaseResponse):
             status=self._get_param("Status"),
             trial_name=self._get_param("TrialName"),
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def describe_trial(self) -> str:
+    def describe_trial(self) -> ActionResult:
         trial_name = self._get_param("TrialName")
         response = self.sagemaker_backend.describe_trial(trial_name)
-        return json.dumps(response)
+        return ActionResult(response)
 
-    def delete_trial(self) -> TYPE_RESPONSE:
+    def delete_trial(self) -> ActionResult:
         trial_name = self._get_param("TrialName")
         self.sagemaker_backend.delete_trial(trial_name)
-        return 200, {}, json.dumps({})
+        return EmptyResult()
 
-    def delete_trial_component(self) -> TYPE_RESPONSE:
+    def delete_trial_component(self) -> ActionResult:
         trial_component_name = self._get_param("TrialComponentName")
         self.sagemaker_backend.delete_trial_component(trial_component_name)
-        return 200, {}, json.dumps({})
+        return EmptyResult()
 
-    def describe_trial_component(self) -> str:
+    def describe_trial_component(self) -> ActionResult:
         trial_component_name = self._get_param("TrialComponentName")
         response = self.sagemaker_backend.describe_trial_component(trial_component_name)
-        return json.dumps(response)
+        return ActionResult(response)
 
-    def associate_trial_component(self) -> TYPE_RESPONSE:
+    def associate_trial_component(self) -> ActionResult:
         trial_name = self._get_param("TrialName")
         trial_component_name = self._get_param("TrialComponentName")
         response = self.sagemaker_backend.associate_trial_component(
             trial_name, trial_component_name
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def disassociate_trial_component(self) -> TYPE_RESPONSE:
+    def disassociate_trial_component(self) -> ActionResult:
         trial_component_name = self._get_param("TrialComponentName")
         trial_name = self._get_param("TrialName")
         response = self.sagemaker_backend.disassociate_trial_component(
             trial_name, trial_component_name
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def update_trial_component(self) -> TYPE_RESPONSE:
+    def update_trial_component(self) -> ActionResult:
         response = self.sagemaker_backend.update_trial_component(
             trial_component_name=self._get_param("TrialComponentName"),
             status=self._get_param("Status"),
@@ -469,15 +468,15 @@ class SageMakerResponse(BaseResponse):
             output_artifacts=self._get_param("OutputArtifacts"),
             output_artifacts_to_remove=self._get_param("OutputArtifactsToRemove"),
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def describe_pipeline(self) -> TYPE_RESPONSE:
+    def describe_pipeline(self) -> ActionResult:
         response = self.sagemaker_backend.describe_pipeline(
             self._get_param("PipelineName")
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def start_pipeline_execution(self) -> TYPE_RESPONSE:
+    def start_pipeline_execution(self) -> ActionResult:
         response = self.sagemaker_backend.start_pipeline_execution(
             self._get_param("PipelineName"),
             self._get_param("PipelineExecutionDisplayName"),
@@ -486,33 +485,33 @@ class SageMakerResponse(BaseResponse):
             self._get_param("ParallelismConfiguration"),
             self._get_param("ClientRequestToken"),
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def describe_pipeline_execution(self) -> TYPE_RESPONSE:
+    def describe_pipeline_execution(self) -> ActionResult:
         response = self.sagemaker_backend.describe_pipeline_execution(
             self._get_param("PipelineExecutionArn")
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def describe_pipeline_definition_for_execution(self) -> TYPE_RESPONSE:
+    def describe_pipeline_definition_for_execution(self) -> ActionResult:
         response = self.sagemaker_backend.describe_pipeline_definition_for_execution(
             self._get_param("PipelineExecutionArn")
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def list_pipeline_parameters_for_execution(self) -> TYPE_RESPONSE:
+    def list_pipeline_parameters_for_execution(self) -> ActionResult:
         response = self.sagemaker_backend.list_pipeline_parameters_for_execution(
             self._get_param("PipelineExecutionArn")
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def list_pipeline_executions(self) -> TYPE_RESPONSE:
+    def list_pipeline_executions(self) -> ActionResult:
         response = self.sagemaker_backend.list_pipeline_executions(
             self._get_param("PipelineName")
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def create_pipeline(self) -> TYPE_RESPONSE:
+    def create_pipeline(self) -> ActionResult:
         pipeline = self.sagemaker_backend.create_pipeline(
             pipeline_name=self._get_param("PipelineName"),
             pipeline_display_name=self._get_param("PipelineDisplayName"),
@@ -526,20 +525,20 @@ class SageMakerResponse(BaseResponse):
             parallelism_configuration=self._get_param("ParallelismConfiguration"),
         )
         response = {
-            "PipelineArn": pipeline.pipeline_arn,
+            "PipelineArn": pipeline.arn,
         }
 
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def delete_pipeline(self) -> TYPE_RESPONSE:
-        pipeline_arn = self.sagemaker_backend.delete_pipeline(
+    def delete_pipeline(self) -> ActionResult:
+        arn = self.sagemaker_backend.delete_pipeline(
             pipeline_name=self._get_param("PipelineName"),
         )
-        response = {"PipelineArn": pipeline_arn}
-        return 200, {}, json.dumps(response)
+        response = {"PipelineArn": arn}
+        return ActionResult(response)
 
-    def update_pipeline(self) -> TYPE_RESPONSE:
-        pipeline_arn = self.sagemaker_backend.update_pipeline(
+    def update_pipeline(self) -> ActionResult:
+        arn = self.sagemaker_backend.update_pipeline(
             pipeline_name=self._get_param("PipelineName"),
             pipeline_display_name=self._get_param("PipelineDisplayName"),
             pipeline_definition=self._get_param("PipelineDefinition"),
@@ -551,10 +550,10 @@ class SageMakerResponse(BaseResponse):
             parallelism_configuration=self._get_param("ParallelismConfiguration"),
         )
 
-        response = {"PipelineArn": pipeline_arn}
-        return 200, {}, json.dumps(response)
+        response = {"PipelineArn": arn}
+        return ActionResult(response)
 
-    def list_pipelines(self) -> TYPE_RESPONSE:
+    def list_pipelines(self) -> ActionResult:
         max_results_range = range(1, 101)
         allowed_sort_by = ("Name", "CreationTime")
         allowed_sort_order = ("Ascending", "Descending")
@@ -594,9 +593,9 @@ class SageMakerResponse(BaseResponse):
             sort_order=sort_order,
         )
 
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def list_processing_jobs(self) -> TYPE_RESPONSE:
+    def list_processing_jobs(self) -> ActionResult:
         max_results_range = range(1, 101)
         allowed_sort_by = ["Name", "CreationTime", "Status"]
         allowed_sort_order = ["Ascending", "Descending"]
@@ -646,9 +645,9 @@ class SageMakerResponse(BaseResponse):
             name_contains=self._get_param("NameContains"),
             status_equals=status_equals,
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def list_transform_jobs(self) -> TYPE_RESPONSE:
+    def list_transform_jobs(self) -> ActionResult:
         max_results_range = range(1, 101)
         allowed_sort_by = ["Name", "CreationTime", "Status"]
         allowed_sort_order = ["Ascending", "Descending"]
@@ -698,9 +697,9 @@ class SageMakerResponse(BaseResponse):
             name_contains=self._get_param("NameContains"),
             status_equals=status_equals,
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def list_training_jobs(self) -> TYPE_RESPONSE:
+    def list_training_jobs(self) -> ActionResult:
         max_results_range = range(1, 101)
         allowed_sort_by = ["Name", "CreationTime", "Status"]
         allowed_sort_order = ["Ascending", "Descending"]
@@ -750,18 +749,18 @@ class SageMakerResponse(BaseResponse):
             name_contains=self._get_param("NameContains"),
             status_equals=status_equals,
         )
-        return 200, {}, json.dumps(response)
+        return ActionResult(response)
 
-    def update_endpoint_weights_and_capacities(self) -> TYPE_RESPONSE:
+    def update_endpoint_weights_and_capacities(self) -> ActionResult:
         endpoint_name = self._get_param("EndpointName")
         desired_weights_and_capacities = self._get_param("DesiredWeightsAndCapacities")
         endpoint_arn = self.sagemaker_backend.update_endpoint_weights_and_capacities(
             endpoint_name=endpoint_name,
             desired_weights_and_capacities=desired_weights_and_capacities,
         )
-        return 200, {}, json.dumps({"EndpointArn": endpoint_arn})
+        return ActionResult({"EndpointArn": endpoint_arn})
 
-    def list_model_package_groups(self) -> str:
+    def list_model_package_groups(self) -> ActionResult:
         creation_time_after = self._get_param("CreationTimeAfter")
         creation_time_before = self._get_param("CreationTimeBefore")
         max_results = self._get_param("MaxResults")
@@ -784,14 +783,14 @@ class SageMakerResponse(BaseResponse):
         model_package_group_summary_list_response_object = [
             x.gen_response_object() for x in model_package_group_summary_list
         ]
-        return json.dumps(
-            dict(
-                ModelPackageGroupSummaryList=model_package_group_summary_list_response_object,
-                NextToken=next_token,
-            )
+        return ActionResult(
+            {
+                "ModelPackageGroupSummaryList": model_package_group_summary_list_response_object,
+                "NextToken": next_token,
+            }
         )
 
-    def list_model_packages(self) -> str:
+    def list_model_packages(self) -> ActionResult:
         creation_time_after = self._get_param("CreationTimeAfter")
         creation_time_before = self._get_param("CreationTimeBefore")
         max_results = self._get_param("MaxResults")
@@ -820,32 +819,32 @@ class SageMakerResponse(BaseResponse):
         model_package_summary_list_response_object = [
             x.gen_response_object() for x in model_package_summary_list
         ]
-        return json.dumps(
-            dict(
-                ModelPackageSummaryList=model_package_summary_list_response_object,
-                NextToken=next_token,
-            )
+        return ActionResult(
+            {
+                "ModelPackageSummaryList": model_package_summary_list_response_object,
+                "NextToken": next_token,
+            }
         )
 
-    def describe_model_package(self) -> str:
+    def describe_model_package(self) -> ActionResult:
         model_package_name = self._get_param("ModelPackageName")
         model_package = self.sagemaker_backend.describe_model_package(
             model_package_name=model_package_name,
         )
-        return json.dumps(
+        return ActionResult(
             model_package.gen_response_object(),
         )
 
-    def describe_model_package_group(self) -> str:
+    def describe_model_package_group(self) -> ActionResult:
         model_package_group_name = self._get_param("ModelPackageGroupName")
         model_package_group = self.sagemaker_backend.describe_model_package_group(
             model_package_group_name=model_package_group_name,
         )
-        return json.dumps(
+        return ActionResult(
             model_package_group.gen_response_object(),
         )
 
-    def update_model_package(self) -> str:
+    def update_model_package(self) -> ActionResult:
         model_package_arn = self._get_param("ModelPackageArn")
         model_approval_status = self._get_param("ModelApprovalStatus")
         approval_dexcription = self._get_param("ApprovalDescription")
@@ -864,9 +863,9 @@ class SageMakerResponse(BaseResponse):
             customer_metadata_properties_to_remove=customer_metadata_properties_to_remove,
             additional_inference_specifications_to_add=additional_inference_specification_to_add,
         )
-        return json.dumps(dict(ModelPackageArn=updated_model_package_arn))
+        return ActionResult({"ModelPackageArn": updated_model_package_arn})
 
-    def create_model_package(self) -> str:
+    def create_model_package(self) -> ActionResult:
         model_package_name = self._get_param("ModelPackageName")
         model_package_group_name = self._get_param("ModelPackageGroupName")
         model_package_description = self._get_param("ModelPackageDescription")
@@ -907,9 +906,9 @@ class SageMakerResponse(BaseResponse):
             additional_inference_specifications=additional_inference_specifications,
             client_token=client_token,
         )
-        return json.dumps(dict(ModelPackageArn=model_package_arn))
+        return ActionResult({"ModelPackageArn": model_package_arn})
 
-    def create_model_package_group(self) -> str:
+    def create_model_package_group(self) -> ActionResult:
         model_package_group_name = self._get_param("ModelPackageGroupName")
         model_package_group_description = self._get_param(
             "ModelPackageGroupDescription"
@@ -920,9 +919,9 @@ class SageMakerResponse(BaseResponse):
             model_package_group_description=model_package_group_description,
             tags=tags,
         )
-        return json.dumps(dict(ModelPackageGroupArn=model_package_group_arn))
+        return ActionResult({"ModelPackageGroupArn": model_package_group_arn})
 
-    def create_feature_group(self) -> str:
+    def create_feature_group(self) -> ActionResult:
         feature_group_arn = self.sagemaker_backend.create_feature_group(
             feature_group_name=self._get_param("FeatureGroupName"),
             record_identifier_feature_name=self._get_param(
@@ -934,10 +933,741 @@ class SageMakerResponse(BaseResponse):
             role_arn=self._get_param("RoleArn"),
             tags=self._get_param("Tags"),
         )
-        return json.dumps(dict(FeatureGroupArn=feature_group_arn))
+        return ActionResult({"FeatureGroupArn": feature_group_arn})
 
-    def describe_feature_group(self) -> str:
+    def describe_feature_group(self) -> ActionResult:
         resp = self.sagemaker_backend.describe_feature_group(
             feature_group_name=self._get_param("FeatureGroupName"),
         )
-        return json.dumps(resp)
+        return ActionResult(resp)
+
+    def create_cluster(self) -> ActionResult:
+        cluster_name = self._get_param("ClusterName")
+        instance_groups = self._get_param("InstanceGroups")
+        vpc_config = self._get_param("VpcConfig")
+        tags = self._get_param("Tags")
+        cluster_arn = self.sagemaker_backend.create_cluster(
+            cluster_name=cluster_name,
+            instance_groups=instance_groups,
+            vpc_config=vpc_config,
+            tags=tags,
+        )
+        return ActionResult({"ClusterArn": cluster_arn})
+
+    def delete_cluster(self) -> ActionResult:
+        cluster_name = self._get_param("ClusterName")
+        cluster_arn = self.sagemaker_backend.delete_cluster(
+            cluster_name=cluster_name,
+        )
+        return ActionResult({"ClusterArn": cluster_arn})
+
+    def describe_cluster(self) -> ActionResult:
+        cluster_name = self._get_param("ClusterName")
+        cluster_description = self.sagemaker_backend.describe_cluster(
+            cluster_name=cluster_name,
+        )
+        return ActionResult(cluster_description)
+
+    def describe_cluster_node(self) -> ActionResult:
+        cluster_name = self._get_param("ClusterName")
+        node_id = self._get_param("NodeId")
+        node_details = self.sagemaker_backend.describe_cluster_node(
+            cluster_name=cluster_name,
+            node_id=node_id,
+        )
+        return ActionResult({"NodeDetails": node_details})
+
+    def list_clusters(self) -> ActionResult:
+        creation_time_after = self._get_param("CreationTimeAfter")
+        creation_time_before = self._get_param("CreationTimeBefore")
+        max_results = self._get_param("MaxResults")
+        name_contains = self._get_param("NameContains")
+        next_token = self._get_param("NextToken")
+        sort_by = self._get_param("SortBy")
+        sort_order = self._get_param("SortOrder")
+        clusters, next_token = self.sagemaker_backend.list_clusters(
+            creation_time_after=creation_time_after,
+            creation_time_before=creation_time_before,
+            max_results=max_results,
+            name_contains=name_contains,
+            next_token=next_token,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+        cluster_summaries = [cluster.summary() for cluster in clusters]
+        return ActionResult(
+            {"NextToken": next_token, "ClusterSummaries": cluster_summaries}
+        )
+
+    def list_cluster_nodes(self) -> ActionResult:
+        cluster_name = self._get_param("ClusterName")
+        creation_time_after = self._get_param("CreationTimeAfter")
+        creation_time_before = self._get_param("CreationTimeBefore")
+        instance_group_name_contains = self._get_param("InstanceGroupNameContains")
+        max_results = self._get_param("MaxResults")
+        next_token = self._get_param("NextToken")
+        sort_by = self._get_param("SortBy")
+        sort_order = self._get_param("SortOrder")
+        cluster_nodes, next_token = self.sagemaker_backend.list_cluster_nodes(
+            cluster_name=cluster_name,
+            creation_time_after=creation_time_after,
+            creation_time_before=creation_time_before,
+            instance_group_name_contains=instance_group_name_contains,
+            max_results=max_results,
+            next_token=next_token,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+        cluster_node_summaries = [node.summary() for node in cluster_nodes]
+        return ActionResult(
+            {"NextToken": next_token, "ClusterNodeSummaries": cluster_node_summaries}
+        )
+
+    def create_model_bias_job_definition(self) -> ActionResult:
+        account_id = self.current_account
+        job_definition_name = self._get_param("JobDefinitionName")
+        tags = self._get_param("Tags", [])
+        role_arn = self._get_param("RoleArn")
+        job_resources = self._get_param("JobResources")
+        stopping_condition = self._get_param("StoppingCondition")
+        environment = self._get_param("Environment", {})
+        network_config = self._get_param("NetworkConfig", {})
+        model_bias_baseline_config = self._get_param("ModelBiasBaselineConfig", {})
+        model_bias_app_specification = self._get_param("ModelBiasAppSpecification")
+        model_bias_job_input = self._get_param("ModelBiasJobInput")
+        model_bias_job_output_config = self._get_param("ModelBiasJobOutputConfig")
+
+        response = self.sagemaker_backend.create_model_bias_job_definition(
+            account_id=account_id,
+            job_definition_name=job_definition_name,
+            tags=tags,
+            role_arn=role_arn,
+            job_resources=job_resources,
+            stopping_condition=stopping_condition,
+            environment=environment,
+            network_config=network_config,
+            model_bias_baseline_config=model_bias_baseline_config,
+            model_bias_app_specification=model_bias_app_specification,
+            model_bias_job_input=model_bias_job_input,
+            model_bias_job_output_config=model_bias_job_output_config,
+        )
+        return ActionResult(response)
+
+    def list_model_bias_job_definitions(self) -> ActionResult:
+        result, next_token = self.sagemaker_backend.list_model_bias_job_definitions()
+        return ActionResult({"JobDefinitionSummaries": result, "NextToken": next_token})
+
+    def describe_model_bias_job_definition(self) -> ActionResult:
+        job_definition_name = self._get_param("JobDefinitionName")
+        job_definition = self.sagemaker_backend.describe_model_bias_job_definition(
+            job_definition_name
+        )
+        return ActionResult(job_definition)
+
+    def delete_model_bias_job_definition(self) -> ActionResult:
+        job_definition_name = self._get_param("JobDefinitionName")
+        self.sagemaker_backend.delete_model_bias_job_definition(job_definition_name)
+        return EmptyResult()
+
+    def create_data_quality_job_definition(self) -> ActionResult:
+        account_id = self.current_account
+        job_definition_name = self._get_param("JobDefinitionName")
+        tags = self._get_param("Tags", [])
+        role_arn = self._get_param("RoleArn")
+        job_resources = self._get_param("JobResources")
+        stopping_condition = self._get_param("StoppingCondition")
+        environment = self._get_param("Environment", {})
+        network_config = self._get_param("NetworkConfig", {})
+        data_quality_baseline_config = self._get_param("DataQualityBaselineConfig", {})
+        data_quality_app_specification = self._get_param("DataQualityAppSpecification")
+        data_quality_job_input = self._get_param("DataQualityJobInput")
+        data_quality_job_output_config = self._get_param("DataQualityJobOutputConfig")
+
+        response = self.sagemaker_backend.create_data_quality_job_definition(
+            account_id=account_id,
+            job_definition_name=job_definition_name,
+            tags=tags,
+            role_arn=role_arn,
+            job_resources=job_resources,
+            stopping_condition=stopping_condition,
+            environment=environment,
+            network_config=network_config,
+            data_quality_baseline_config=data_quality_baseline_config,
+            data_quality_app_specification=data_quality_app_specification,
+            data_quality_job_input=data_quality_job_input,
+            data_quality_job_output_config=data_quality_job_output_config,
+        )
+        return ActionResult(response)
+
+    def list_data_quality_job_definitions(self) -> ActionResult:
+        result, next_token = self.sagemaker_backend.list_data_quality_job_definitions()
+        return ActionResult({"JobDefinitionSummaries": result, "NextToken": next_token})
+
+    def describe_data_quality_job_definition(self) -> ActionResult:
+        job_definition_name = self._get_param("JobDefinitionName")
+        job_definition = self.sagemaker_backend.describe_data_quality_job_definition(
+            job_definition_name
+        )
+        return ActionResult(job_definition)
+
+    def delete_data_quality_job_definition(self) -> ActionResult:
+        job_definition_name = self._get_param("JobDefinitionName")
+        self.sagemaker_backend.delete_data_quality_job_definition(job_definition_name)
+        return EmptyResult()
+
+    def create_auto_ml_job_v2(self) -> ActionResult:
+        auto_ml_job_name = self._get_param("AutoMLJobName")
+        auto_ml_job_input_data_config = self._get_param("AutoMLJobInputDataConfig")
+        output_data_config = self._get_param("OutputDataConfig")
+        auto_ml_problem_type_config = self._get_param("AutoMLProblemTypeConfig")
+        role_arn = self._get_param("RoleArn")
+        tags = self._get_param("Tags")
+        security_config = self._get_param("SecurityConfig")
+        auto_ml_job_objective = self._get_param("AutoMLJobObjective")
+        model_deploy_config = self._get_param("ModelDeployConfig")
+        data_split_config = self._get_param("DataSplitConfig")
+        auto_ml_job_arn = self.sagemaker_backend.create_auto_ml_job_v2(
+            auto_ml_job_name=auto_ml_job_name,
+            auto_ml_job_input_data_config=auto_ml_job_input_data_config,
+            output_data_config=output_data_config,
+            auto_ml_problem_type_config=auto_ml_problem_type_config,
+            role_arn=role_arn,
+            tags=tags,
+            security_config=security_config,
+            auto_ml_job_objective=auto_ml_job_objective,
+            model_deploy_config=model_deploy_config,
+            data_split_config=data_split_config,
+        )
+        return ActionResult({"AutoMLJobArn": auto_ml_job_arn})
+
+    def describe_auto_ml_job_v2(self) -> ActionResult:
+        auto_ml_job_name = self._get_param("AutoMLJobName")
+        auto_ml_job_description = self.sagemaker_backend.describe_auto_ml_job_v2(
+            auto_ml_job_name=auto_ml_job_name,
+        )
+        return ActionResult(auto_ml_job_description)
+
+    def list_auto_ml_jobs(self) -> ActionResult:
+        creation_time_after = self._get_param("CreationTimeAfter")
+        creation_time_before = self._get_param("CreationTimeBefore")
+        last_modified_time_after = self._get_param("LastModifiedTimeAfter")
+        last_modified_time_before = self._get_param("LastModifiedTimeBefore")
+        name_contains = self._get_param("NameContains")
+        status_equals = self._get_param("StatusEquals")
+        sort_order = self._get_param("SortOrder")
+        sort_by = self._get_param("SortBy")
+        max_results = self._get_param("MaxResults")
+        next_token = self._get_param("NextToken")
+        auto_ml_jobs, next_token = self.sagemaker_backend.list_auto_ml_jobs(
+            creation_time_after=creation_time_after,
+            creation_time_before=creation_time_before,
+            last_modified_time_after=last_modified_time_after,
+            last_modified_time_before=last_modified_time_before,
+            name_contains=name_contains,
+            status_equals=status_equals,
+            sort_order=sort_order,
+            sort_by=sort_by,
+            max_results=max_results,
+            next_token=next_token,
+        )
+        auto_ml_job_summaries = [auto_ml_job.summary() for auto_ml_job in auto_ml_jobs]
+        return ActionResult(
+            {"AutoMLJobSummaries": auto_ml_job_summaries, "NextToken": next_token}
+        )
+
+    def stop_auto_ml_job(self) -> ActionResult:
+        auto_ml_job_name = self._get_param("AutoMLJobName")
+        self.sagemaker_backend.stop_auto_ml_job(
+            auto_ml_job_name=auto_ml_job_name,
+        )
+        return EmptyResult()
+
+    def list_endpoints(self) -> ActionResult:
+        sort_by = self._get_param("SortBy")
+        sort_order = self._get_param("SortOrder")
+        next_token = self._get_param("NextToken")
+        max_results = self._get_param("MaxResults")
+        name_contains = self._get_param("NameContains")
+        creation_time_before = self._get_param("CreationTimeBefore")
+        creation_time_after = self._get_param("CreationTimeAfter")
+        last_modified_time_before = self._get_param("LastModifiedTimeBefore")
+        last_modified_time_after = self._get_param("LastModifiedTimeAfter")
+        status_equals = self._get_param("StatusEquals")
+        endpoints, next_token = self.sagemaker_backend.list_endpoints(
+            sort_by=sort_by,
+            sort_order=sort_order,
+            next_token=next_token,
+            max_results=max_results,
+            name_contains=name_contains,
+            creation_time_before=creation_time_before,
+            creation_time_after=creation_time_after,
+            last_modified_time_before=last_modified_time_before,
+            last_modified_time_after=last_modified_time_after,
+            status_equals=status_equals,
+        )
+        endpoint_summaries = [endpoint.summary() for endpoint in endpoints]
+        return ActionResult({"Endpoints": endpoint_summaries, "NextToken": next_token})
+
+    def list_endpoint_configs(self) -> ActionResult:
+        sort_by = self._get_param("SortBy")
+        sort_order = self._get_param("SortOrder")
+        next_token = self._get_param("NextToken")
+        max_results = self._get_param("MaxResults")
+        name_contains = self._get_param("NameContains")
+        creation_time_before = self._get_param("CreationTimeBefore")
+        creation_time_after = self._get_param("CreationTimeAfter")
+        endpoint_configs, next_token = self.sagemaker_backend.list_endpoint_configs(
+            sort_by=sort_by,
+            sort_order=sort_order,
+            next_token=next_token,
+            max_results=max_results,
+            name_contains=name_contains,
+            creation_time_before=creation_time_before,
+            creation_time_after=creation_time_after,
+        )
+        endpoint_summaries = [
+            endpoint_config.summary() for endpoint_config in endpoint_configs
+        ]
+        return ActionResult(
+            {"EndpointConfigs": endpoint_summaries, "NextToken": next_token}
+        )
+
+    def create_compilation_job(self) -> ActionResult:
+        compilation_job_name = self._get_param("CompilationJobName")
+        role_arn = self._get_param("RoleArn")
+        model_package_version_arn = self._get_param("ModelPackageVersionArn")
+        input_config = self._get_param("InputConfig")
+        output_config = self._get_param("OutputConfig")
+        vpc_config = self._get_param("VpcConfig")
+        stopping_condition = self._get_param("StoppingCondition")
+        tags = self._get_param("Tags")
+        compilation_job_arn = self.sagemaker_backend.create_compilation_job(
+            compilation_job_name=compilation_job_name,
+            role_arn=role_arn,
+            model_package_version_arn=model_package_version_arn,
+            input_config=input_config,
+            output_config=output_config,
+            vpc_config=vpc_config,
+            stopping_condition=stopping_condition,
+            tags=tags,
+        )
+        return ActionResult({"CompilationJobArn": compilation_job_arn})
+
+    def describe_compilation_job(self) -> ActionResult:
+        compilation_job_name = self._get_param("CompilationJobName")
+        compilation_job_description = self.sagemaker_backend.describe_compilation_job(
+            compilation_job_name=compilation_job_name,
+        )
+        return ActionResult(compilation_job_description)
+
+    def list_compilation_jobs(self) -> ActionResult:
+        next_token = self._get_param("NextToken")
+        max_results = self._get_param("MaxResults")
+        creation_time_after = self._get_param("CreationTimeAfter")
+        creation_time_before = self._get_param("CreationTimeBefore")
+        last_modified_time_after = self._get_param("LastModifiedTimeAfter")
+        last_modified_time_before = self._get_param("LastModifiedTimeBefore")
+        name_contains = self._get_param("NameContains")
+        status_equals = self._get_param("StatusEquals")
+        sort_by = self._get_param("SortBy")
+        sort_order = self._get_param("SortOrder")
+        compilation_jobs, next_token = self.sagemaker_backend.list_compilation_jobs(
+            next_token=next_token,
+            max_results=max_results,
+            creation_time_after=creation_time_after,
+            creation_time_before=creation_time_before,
+            last_modified_time_after=last_modified_time_after,
+            last_modified_time_before=last_modified_time_before,
+            name_contains=name_contains,
+            status_equals=status_equals,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+        compilation_job_summaries = [x.summary() for x in compilation_jobs]
+        return ActionResult(
+            {
+                "CompilationJobSummaries": compilation_job_summaries,
+                "NextToken": next_token,
+            }
+        )
+
+    def delete_compilation_job(self) -> ActionResult:
+        compilation_job_name = self._get_param("CompilationJobName")
+        self.sagemaker_backend.delete_compilation_job(
+            compilation_job_name=compilation_job_name,
+        )
+        return EmptyResult()
+
+    def create_domain(self) -> ActionResult:
+        domain_name = self._get_param("DomainName")
+        auth_mode = self._get_param("AuthMode")
+        default_user_settings = self._get_param("DefaultUserSettings")
+        domain_settings = self._get_param("DomainSettings")
+        subnet_ids = self._get_param("SubnetIds")
+        vpc_id = self._get_param("VpcId")
+        tags = self._get_param("Tags")
+        app_network_access_type = self._get_param("AppNetworkAccessType")
+        home_efs_file_system_kms_key_id = self._get_param("HomeEfsFileSystemKmsKeyId")
+        kms_key_id = self._get_param("KmsKeyId")
+        app_security_group_management = self._get_param("AppSecurityGroupManagement")
+        default_space_settings = self._get_param("DefaultSpaceSettings")
+        resp = self.sagemaker_backend.create_domain(
+            domain_name=domain_name,
+            auth_mode=auth_mode,
+            default_user_settings=default_user_settings,
+            domain_settings=domain_settings,
+            subnet_ids=subnet_ids,
+            vpc_id=vpc_id,
+            tags=tags,
+            app_network_access_type=app_network_access_type,
+            home_efs_file_system_kms_key_id=home_efs_file_system_kms_key_id,
+            kms_key_id=kms_key_id,
+            app_security_group_management=app_security_group_management,
+            default_space_settings=default_space_settings,
+        )
+        return ActionResult(resp)
+
+    def describe_domain(self) -> ActionResult:
+        domain_id = self._get_param("DomainId")
+        domain_description = self.sagemaker_backend.describe_domain(
+            domain_id=domain_id,
+        )
+        return ActionResult(domain_description)
+
+    def list_domains(self) -> ActionResult:
+        next_token = self._get_param("NextToken")
+        max_results = self._get_param("MaxResults")
+        domains, next_token = self.sagemaker_backend.list_domains(
+            next_token=next_token,
+            max_results=max_results,
+        )
+        domain_summaries = [domain.summary() for domain in domains]
+        return ActionResult({"Domains": domain_summaries, "NextToken": next_token})
+
+    def delete_domain(self) -> ActionResult:
+        domain_id = self._get_param("DomainId")
+        retention_policy = self._get_param("RetentionPolicy")
+        self.sagemaker_backend.delete_domain(
+            domain_id=domain_id,
+            retention_policy=retention_policy,
+        )
+        return EmptyResult()
+
+    def create_model_explainability_job_definition(self) -> ActionResult:
+        job_definition_name = self._get_param("JobDefinitionName")
+        model_explainability_baseline_config = self._get_param(
+            "ModelExplainabilityBaselineConfig"
+        )
+        model_explainability_app_specification = self._get_param(
+            "ModelExplainabilityAppSpecification"
+        )
+        model_explainability_job_input = self._get_param("ModelExplainabilityJobInput")
+        model_explainability_job_output_config = self._get_param(
+            "ModelExplainabilityJobOutputConfig"
+        )
+        job_resources = self._get_param("JobResources")
+        network_config = self._get_param("NetworkConfig")
+        role_arn = self._get_param("RoleArn")
+        stopping_condition = self._get_param("StoppingCondition")
+        tags = self._get_param("Tags")
+        job_definition_arn = self.sagemaker_backend.create_model_explainability_job_definition(
+            job_definition_name=job_definition_name,
+            model_explainability_baseline_config=model_explainability_baseline_config,
+            model_explainability_app_specification=model_explainability_app_specification,
+            model_explainability_job_input=model_explainability_job_input,
+            model_explainability_job_output_config=model_explainability_job_output_config,
+            job_resources=job_resources,
+            network_config=network_config,
+            role_arn=role_arn,
+            stopping_condition=stopping_condition,
+            tags=tags,
+        )
+        return ActionResult({"JobDefinitionArn": job_definition_arn})
+
+    def describe_model_explainability_job_definition(self) -> ActionResult:
+        job_definition_name = self._get_param("JobDefinitionName")
+        description = (
+            self.sagemaker_backend.describe_model_explainability_job_definition(
+                job_definition_name=job_definition_name,
+            )
+        )
+        return ActionResult(description)
+
+    def list_model_explainability_job_definitions(self) -> ActionResult:
+        endpoint_name = self._get_param("EndpointName")
+        sort_by = self._get_param("SortBy")
+        sort_order = self._get_param("SortOrder")
+        next_token = self._get_param("NextToken")
+        max_results = self._get_param("MaxResults")
+        name_contains = self._get_param("NameContains")
+        creation_time_before = self._get_param("CreationTimeBefore")
+        creation_time_after = self._get_param("CreationTimeAfter")
+        job_definitions, next_token = (
+            self.sagemaker_backend.list_model_explainability_job_definitions(
+                endpoint_name=endpoint_name,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                next_token=next_token,
+                max_results=max_results,
+                name_contains=name_contains,
+                creation_time_before=creation_time_before,
+                creation_time_after=creation_time_after,
+            )
+        )
+        job_definition_summaries = [job.summary() for job in job_definitions]
+        return ActionResult(
+            {
+                "JobDefinitionSummaries": job_definition_summaries,
+                "NextToken": next_token,
+            }
+        )
+
+    def delete_model_explainability_job_definition(self) -> ActionResult:
+        job_definition_name = self._get_param("JobDefinitionName")
+        self.sagemaker_backend.delete_model_explainability_job_definition(
+            job_definition_name=job_definition_name,
+        )
+        return EmptyResult()
+
+    def create_hyper_parameter_tuning_job(self) -> ActionResult:
+        hyper_parameter_tuning_job_name = self._get_param("HyperParameterTuningJobName")
+        hyper_parameter_tuning_job_config = self._get_param(
+            "HyperParameterTuningJobConfig"
+        )
+        training_job_definition = self._get_param("TrainingJobDefinition")
+        training_job_definitions = self._get_param("TrainingJobDefinitions")
+        warm_start_config = self._get_param("WarmStartConfig")
+        tags = self._get_param("Tags")
+        autotune = self._get_param("Autotune")
+        hyper_parameter_tuning_job_arn = (
+            self.sagemaker_backend.create_hyper_parameter_tuning_job(
+                hyper_parameter_tuning_job_name=hyper_parameter_tuning_job_name,
+                hyper_parameter_tuning_job_config=hyper_parameter_tuning_job_config,
+                training_job_definition=training_job_definition,
+                training_job_definitions=training_job_definitions,
+                warm_start_config=warm_start_config,
+                tags=tags,
+                autotune=autotune,
+            )
+        )
+        return ActionResult(
+            {"HyperParameterTuningJobArn": hyper_parameter_tuning_job_arn}
+        )
+
+    def describe_hyper_parameter_tuning_job(self) -> ActionResult:
+        hyper_parameter_tuning_job_name = self._get_param("HyperParameterTuningJobName")
+        hyper_parameter_tuning_job_description = (
+            self.sagemaker_backend.describe_hyper_parameter_tuning_job(
+                hyper_parameter_tuning_job_name=hyper_parameter_tuning_job_name,
+            )
+        )
+        return ActionResult(hyper_parameter_tuning_job_description)
+
+    def list_hyper_parameter_tuning_jobs(self) -> ActionResult:
+        next_token = self._get_param("NextToken")
+        max_results = self._get_param("MaxResults")
+        sort_by = self._get_param("SortBy")
+        sort_order = self._get_param("SortOrder")
+        name_contains = self._get_param("NameContains")
+        creation_time_after = self._get_param("CreationTimeAfter")
+        creation_time_before = self._get_param("CreationTimeBefore")
+        last_modified_time_after = self._get_param("LastModifiedTimeAfter")
+        last_modified_time_before = self._get_param("LastModifiedTimeBefore")
+        status_equals = self._get_param("StatusEquals")
+        hyper_parameter_tuning_jobs, next_token = (
+            self.sagemaker_backend.list_hyper_parameter_tuning_jobs(
+                next_token=next_token,
+                max_results=max_results,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                name_contains=name_contains,
+                creation_time_after=creation_time_after,
+                creation_time_before=creation_time_before,
+                last_modified_time_after=last_modified_time_after,
+                last_modified_time_before=last_modified_time_before,
+                status_equals=status_equals,
+            )
+        )
+        hyper_parameter_tuning_job_summaries = [
+            job.summary() for job in hyper_parameter_tuning_jobs
+        ]
+        return ActionResult(
+            {
+                "HyperParameterTuningJobSummaries": hyper_parameter_tuning_job_summaries,
+                "NextToken": next_token,
+            }
+        )
+
+    def delete_hyper_parameter_tuning_job(self) -> ActionResult:
+        hyper_parameter_tuning_job_name = self._get_param("HyperParameterTuningJobName")
+        self.sagemaker_backend.delete_hyper_parameter_tuning_job(
+            hyper_parameter_tuning_job_name=hyper_parameter_tuning_job_name,
+        )
+        return EmptyResult()
+
+    def create_model_quality_job_definition(self) -> ActionResult:
+        job_definition_name = self._get_param("JobDefinitionName")
+        model_quality_baseline_config = self._get_param("ModelQualityBaselineConfig")
+        model_quality_app_specification = self._get_param(
+            "ModelQualityAppSpecification"
+        )
+        model_quality_job_input = self._get_param("ModelQualityJobInput")
+        model_quality_job_output_config = self._get_param("ModelQualityJobOutputConfig")
+        job_resources = self._get_param("JobResources")
+        network_config = self._get_param("NetworkConfig")
+        role_arn = self._get_param("RoleArn")
+        stopping_condition = self._get_param("StoppingCondition")
+        tags = self._get_param("Tags")
+        job_definition_arn = self.sagemaker_backend.create_model_quality_job_definition(
+            job_definition_name=job_definition_name,
+            model_quality_baseline_config=model_quality_baseline_config,
+            model_quality_app_specification=model_quality_app_specification,
+            model_quality_job_input=model_quality_job_input,
+            model_quality_job_output_config=model_quality_job_output_config,
+            job_resources=job_resources,
+            network_config=network_config,
+            role_arn=role_arn,
+            stopping_condition=stopping_condition,
+            tags=tags,
+        )
+        return ActionResult({"JobDefinitionArn": job_definition_arn})
+
+    def describe_model_quality_job_definition(self) -> ActionResult:
+        job_definition_name = self._get_param("JobDefinitionName")
+        description = self.sagemaker_backend.describe_model_quality_job_definition(
+            job_definition_name=job_definition_name,
+        )
+        return ActionResult(description)
+
+    def list_model_quality_job_definitions(self) -> ActionResult:
+        endpoint_name = self._get_param("EndpointName")
+        sort_by = self._get_param("SortBy")
+        sort_order = self._get_param("SortOrder")
+        next_token = self._get_param("NextToken")
+        max_results = self._get_param("MaxResults")
+        name_contains = self._get_param("NameContains")
+        creation_time_before = self._get_param("CreationTimeBefore")
+        creation_time_after = self._get_param("CreationTimeAfter")
+        job_definitions, next_token = (
+            self.sagemaker_backend.list_model_quality_job_definitions(
+                endpoint_name=endpoint_name,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                next_token=next_token,
+                max_results=max_results,
+                name_contains=name_contains,
+                creation_time_before=creation_time_before,
+                creation_time_after=creation_time_after,
+            )
+        )
+        job_definition_summaries = [x.summary() for x in job_definitions]
+        return ActionResult(
+            {
+                "JobDefinitionSummaries": job_definition_summaries,
+                "NextToken": next_token,
+            }
+        )
+
+    def delete_model_quality_job_definition(self) -> ActionResult:
+        job_definition_name = self._get_param("JobDefinitionName")
+        self.sagemaker_backend.delete_model_quality_job_definition(
+            job_definition_name=job_definition_name,
+        )
+        return EmptyResult()
+
+    def create_model_card(self) -> ActionResult:
+        model_card_name = self._get_param("ModelCardName")
+        security_config = self._get_param("SecurityConfig")
+        content = self._get_param("Content")
+        model_card_status = self._get_param("ModelCardStatus")
+        tags = self._get_param("Tags")
+        model_card_arn = self.sagemaker_backend.create_model_card(
+            model_card_name=model_card_name,
+            security_config=security_config,
+            content=content,
+            model_card_status=model_card_status,
+            tags=tags,
+        )
+        return ActionResult({"ModelCardArn": model_card_arn})
+
+    def list_model_cards(self) -> ActionResult:
+        creation_time_after = self._get_param("CreationTimeAfter")
+        creation_time_before = self._get_param("CreationTimeBefore")
+        max_results = self._get_param("MaxResults")
+        name_contains = self._get_param("NameContains")
+        model_card_status = self._get_param("ModelCardStatus")
+        next_token = self._get_param("NextToken")
+        sort_by = self._get_param("SortBy")
+        sort_order = self._get_param("SortOrder")
+        model_cards, next_token = self.sagemaker_backend.list_model_cards(
+            creation_time_after=creation_time_after,
+            creation_time_before=creation_time_before,
+            max_results=max_results,
+            name_contains=name_contains,
+            model_card_status=model_card_status,
+            next_token=next_token,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+        model_card_summaries = [model_card.summary() for model_card in model_cards]
+        return ActionResult(
+            {"ModelCardSummaries": model_card_summaries, "NextToken": next_token}
+        )
+
+    def list_model_card_versions(self) -> ActionResult:
+        creation_time_after = self._get_param("CreationTimeAfter")
+        creation_time_before = self._get_param("CreationTimeBefore")
+        max_results = self._get_param("MaxResults")
+        model_card_name = self._get_param("ModelCardName")
+        model_card_status = self._get_param("ModelCardStatus")
+        next_token = self._get_param("NextToken")
+        sort_by = self._get_param("SortBy")
+        sort_order = self._get_param("SortOrder")
+        model_card_versions, next_token = (
+            self.sagemaker_backend.list_model_card_versions(
+                creation_time_after=creation_time_after,
+                creation_time_before=creation_time_before,
+                max_results=max_results,
+                model_card_name=model_card_name,
+                model_card_status=model_card_status,
+                next_token=next_token,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
+        )
+        model_card_version_summaries = [
+            mcv.version_summary() for mcv in model_card_versions
+        ]
+        return ActionResult(
+            {
+                "ModelCardVersionSummaryList": model_card_version_summaries,
+                "NextToken": next_token,
+            }
+        )
+
+    def update_model_card(self) -> ActionResult:
+        model_card_name = self._get_param("ModelCardName")
+        content = self._get_param("Content")
+        model_card_status = self._get_param("ModelCardStatus")
+        model_card_arn = self.sagemaker_backend.update_model_card(
+            model_card_name=model_card_name,
+            content=content,
+            model_card_status=model_card_status,
+        )
+        return ActionResult({"ModelCardArn": model_card_arn})
+
+    def describe_model_card(self) -> ActionResult:
+        model_card_name = self._get_param("ModelCardName")
+        model_card_version = self._get_param("ModelCardVersion")
+        model_card_description = self.sagemaker_backend.describe_model_card(
+            model_card_name=model_card_name,
+            model_card_version=model_card_version,
+        )
+        return ActionResult(model_card_description)
+
+    def delete_model_card(self) -> ActionResult:
+        model_card_name = self._get_param("ModelCardName")
+        self.sagemaker_backend.delete_model_card(
+            model_card_name=model_card_name,
+        )
+        return EmptyResult()

@@ -8,10 +8,12 @@ import pytest
 from botocore.exceptions import ClientError
 
 from moto import mock_aws, settings
+from moto.core import set_initial_no_auth_action_count
 
 from ..markers import requires_docker
 from .test_lambda import LooseVersion, boto3_version
 from .utilities import (
+    PYTHON_VERSION,
     get_lambda_using_environment_port,
     get_lambda_using_network_mode,
     get_proxy_zip_file,
@@ -23,7 +25,6 @@ from .utilities import (
     get_zip_with_multiple_files,
 )
 
-PYTHON_VERSION = "python3.11"
 _lambda_region = "us-west-2"
 
 
@@ -123,7 +124,7 @@ class TestLambdaInvocations:
         )
 
         if "FunctionError" in success_result:
-            assert False, success_result["Payload"].read().decode("utf-8")
+            raise AssertionError(success_result["Payload"].read().decode("utf-8"))
 
         assert success_result["StatusCode"] == 200
         assert (
@@ -199,6 +200,7 @@ def test_invoke_lambda_using_environment_port():
         Role=get_role_name(),
         Handler="lambda_function.lambda_handler",
         Code={"ZipFile": get_lambda_using_environment_port()},
+        Timeout=30,
     )
 
     success_result = conn.invoke(
@@ -277,7 +279,7 @@ def test_invoke_function_with_multiple_files_in_zip():
     }
 
 
-if settings.TEST_SERVER_MODE:
+if not settings.TEST_DECORATOR_MODE:
 
     @mock_aws
     def test_invoke_function_get_ec2_volume():
@@ -294,7 +296,7 @@ if settings.TEST_SERVER_MODE:
             Handler="lambda_function.lambda_handler",
             Code={"ZipFile": get_test_zip_file2()},
             Description="test lambda function",
-            Timeout=3,
+            Timeout=30,
             MemorySize=128,
             Publish=True,
         )
@@ -418,3 +420,36 @@ def test_invoke_lambda_with_entrypoint():
     payload = result["Payload"].read().decode("utf-8")
 
     assert json.loads(payload) == in_data
+
+
+@set_initial_no_auth_action_count(4)
+@mock_aws
+def test_lambda_request_unauthorized_user():
+    if not settings.TEST_DECORATOR_MODE:
+        raise SkipTest("Auth decorator does not work in server mode")
+    iam = boto3.client("iam", region_name="us-west-2")
+    user_name = "test-user"
+    iam.create_user(UserName=user_name)
+    policy_document = {
+        "Version": "2012-10-17",
+        "Statement": {
+            "Effect": "Deny",
+            "Action": ["s3:*", "secretsmanager:*", "lambda:*"],
+            "Resource": "*",
+        },
+    }
+    policy_arn = iam.create_policy(
+        PolicyName="policy2", PolicyDocument=json.dumps(policy_document)
+    )["Policy"]["Arn"]
+    iam.attach_user_policy(UserName=user_name, PolicyArn=policy_arn)
+    access_key = iam.create_access_key(UserName=user_name)["AccessKey"]
+
+    _lambda = boto3.session.Session(
+        aws_access_key_id=access_key["AccessKeyId"],
+        aws_secret_access_key=access_key["SecretAccessKey"],
+        region_name="us-west-2",
+    ).client(service_name="lambda")
+
+    with pytest.raises(ClientError) as exc:
+        _lambda.invoke(FunctionName="n/a", Payload="{}")
+    assert "not authorized to perform: lambda:Invoke" in str(exc.value)

@@ -1,17 +1,19 @@
 import json
+import math
+from collections.abc import Iterable, Iterator
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, SupportsFloat, Tuple
-
-from dateutil import parser
-from dateutil.tz import tzutc
+from typing import Any, SupportsFloat
+from uuid import uuid4
 
 from moto.core.base_backend import BaseBackend
-from moto.core.common_models import BackendDict, BaseModel, CloudWatchMetricProvider
-from moto.core.utils import (
-    iso_8601_datetime_with_nanoseconds,
-    iso_8601_datetime_without_milliseconds,
-    utcnow,
+from moto.core.common_models import (
+    BackendDict,
+    BaseModel,
+    CloudFormationModel,
+    CloudWatchMetricProvider,
 )
+from moto.core.resource_tagging import TaggableResourcesMixin, TaggedResource
+from moto.core.utils import utcnow
 from moto.moto_api._internal import mock_random
 
 from ..utilities.tagging_service import TaggingService
@@ -24,13 +26,17 @@ from .exceptions import (
     ValidationError,
 )
 from .metric_data_expression_parser import parse_expression
-from .utils import make_arn_for_alarm, make_arn_for_dashboard
+from .utils import (
+    make_arn_for_alarm,
+    make_arn_for_dashboard,
+    make_arn_for_rule,
+)
 
-_EMPTY_LIST: Any = tuple()
+_EMPTY_LIST: Any = ()
 
 
-class Dimension(object):
-    def __init__(self, name: Optional[str], value: Optional[str]):
+class Dimension:
+    def __init__(self, name: str | None, value: str | None):
         self.name = name
         self.value = value
 
@@ -45,14 +51,14 @@ class Dimension(object):
         return self.name < other.name and self.value < other.name  # type: ignore[operator]
 
 
-class Metric(object):
-    def __init__(self, metric_name: str, namespace: str, dimensions: List[Dimension]):
+class Metric:
+    def __init__(self, metric_name: str, namespace: str, dimensions: list[Dimension]):
         self.metric_name = metric_name
         self.namespace = namespace
         self.dimensions = dimensions
 
 
-class MetricStat(object):
+class MetricStat:
     def __init__(self, metric: Metric, period: str, stat: str, unit: str):
         self.metric = metric
         self.period = period
@@ -60,15 +66,15 @@ class MetricStat(object):
         self.unit = unit
 
 
-class MetricDataQuery(object):
+class MetricDataQuery:
     def __init__(
         self,
         query_id: str,
         label: str,
         period: str,
         return_data: str,
-        expression: Optional[str] = None,
-        metric_stat: Optional[MetricStat] = None,
+        expression: str | None = None,
+        metric_stat: MetricStat | None = None,
     ):
         self.id = query_id
         self.label = label
@@ -111,7 +117,7 @@ def daterange(
         yield start
 
 
-class FakeAlarm(BaseModel):
+class Alarm(BaseModel):
     def __init__(
         self,
         account_id: str,
@@ -119,25 +125,25 @@ class FakeAlarm(BaseModel):
         name: str,
         namespace: str,
         metric_name: str,
-        metric_data_queries: Optional[List[MetricDataQuery]],
+        metric_data_queries: list[MetricDataQuery] | None,
         comparison_operator: str,
         evaluation_periods: int,
-        datapoints_to_alarm: Optional[int],
+        datapoints_to_alarm: int | None,
         period: int,
         threshold: float,
         statistic: str,
-        extended_statistic: Optional[str],
+        extended_statistic: str | None,
         description: str,
-        dimensions: List[Dict[str, str]],
-        alarm_actions: List[str],
-        ok_actions: Optional[List[str]],
-        insufficient_data_actions: Optional[List[str]],
-        unit: Optional[str],
+        dimensions: list[dict[str, str]],
+        alarm_actions: list[str],
+        ok_actions: list[str] | None,
+        insufficient_data_actions: list[str] | None,
+        unit: str | None,
         actions_enabled: bool,
-        treat_missing_data: Optional[str],
-        evaluate_low_sample_count_percentile: Optional[str],
-        threshold_metric_id: Optional[str],
-        rule: Optional[str],
+        treat_missing_data: str | None,
+        evaluate_low_sample_count_percentile: str | None,
+        threshold_metric_id: str | None,
+        rule: str | None,
     ):
         self.region_name = region_name
         self.name = name
@@ -154,24 +160,24 @@ class FakeAlarm(BaseModel):
         self.extended_statistic = extended_statistic
         self.description = description
         self.dimensions = [
-            Dimension(dimension["name"], dimension["value"]) for dimension in dimensions
+            Dimension(dimension["Name"], dimension["Value"]) for dimension in dimensions
         ]
         self.actions_enabled = True if actions_enabled is None else actions_enabled
         self.alarm_actions = alarm_actions
         self.ok_actions = ok_actions or []
         self.insufficient_data_actions = insufficient_data_actions or []
         self.unit = unit
-        self.configuration_updated_timestamp = iso_8601_datetime_with_nanoseconds()
+        self.configuration_updated_timestamp = utcnow()
         self.treat_missing_data = treat_missing_data
         self.evaluate_low_sample_count_percentile = evaluate_low_sample_count_percentile
         self.threshold_metric_id = threshold_metric_id
 
-        self.history: List[Any] = []
+        self.history: list[Any] = []
 
         self.state_reason = "Unchecked: Initial alarm creation"
         self.state_reason_data = "{}"
         self.state_value = "OK"
-        self.state_updated_timestamp = iso_8601_datetime_with_nanoseconds()
+        self.state_updated_timestamp = utcnow()
 
         # only used for composite alarms
         self.rule = rule
@@ -191,11 +197,11 @@ class FakeAlarm(BaseModel):
         self.state_reason = reason
         self.state_reason_data = reason_data
         self.state_value = state_value
-        self.state_updated_timestamp = iso_8601_datetime_with_nanoseconds()
+        self.state_updated_timestamp = utcnow()
 
 
 def are_dimensions_same(
-    metric_dimensions: List[Dimension], dimensions: List[Dimension]
+    metric_dimensions: list[Dimension], dimensions: list[Dimension]
 ) -> bool:
     if len(metric_dimensions) != len(dimensions):
         return False
@@ -218,13 +224,13 @@ class MetricDatumBase(BaseModel):
         self,
         namespace: str,
         name: str,
-        dimensions: List[Dict[str, str]],
-        timestamp: datetime,
+        dimensions: list[dict[str, str]],
+        timestamp: datetime | None,
         unit: Any = None,
     ):
         self.namespace = namespace
         self.name = name
-        self.timestamp = timestamp or utcnow().replace(tzinfo=tzutc())
+        self.timestamp = timestamp or utcnow()
         self.dimensions = [
             Dimension(dimension["Name"], dimension["Value"]) for dimension in dimensions
         ]
@@ -232,10 +238,10 @@ class MetricDatumBase(BaseModel):
 
     def filter(
         self,
-        namespace: Optional[str],
-        name: Optional[str],
-        dimensions: List[Dict[str, str]],
-        already_present_metrics: Optional[List["MetricDatumBase"]] = None,
+        namespace: str | None,
+        name: str | None,
+        dimensions: list[dict[str, str]],
+        already_present_metrics: list["MetricDatumBase"] | None = None,
     ) -> bool:
         if namespace and namespace != self.namespace:
             return False
@@ -271,8 +277,8 @@ class MetricDatum(MetricDatumBase):
         namespace: str,
         name: str,
         value: float,
-        dimensions: List[Dict[str, str]],
-        timestamp: datetime,
+        dimensions: list[dict[str, str]],
+        timestamp: datetime | None,
         unit: Any = None,
     ):
         super().__init__(namespace, name, dimensions, timestamp, unit)
@@ -292,8 +298,8 @@ class MetricAggregatedDatum(MetricDatumBase):
         max_stat: float,
         sample_count: float,
         sum_stat: float,
-        dimensions: List[Dict[str, str]],
-        timestamp: datetime,
+        dimensions: list[dict[str, str]],
+        timestamp: datetime | None,
         unit: Any = None,
     ):
         super().__init__(namespace, name, dimensions, timestamp, unit)
@@ -303,17 +309,13 @@ class MetricAggregatedDatum(MetricDatumBase):
         self.sum = sum_stat
 
 
-class Dashboard(BaseModel):
-    def __init__(self, account_id: str, name: str, body: str):
+class Dashboard(CloudFormationModel):
+    def __init__(self, account_id: str, region_name: str, name: str, body: str):
         # Guaranteed to be unique for now as the name is also the key of a dictionary where they are stored
-        self.arn = make_arn_for_dashboard(account_id, name)
+        self.arn = make_arn_for_dashboard(account_id, region_name, name)
         self.name = name
         self.body = body
         self.last_modified = datetime.now()
-
-    @property
-    def last_modified_iso(self) -> str:
-        return self.last_modified.isoformat()
 
     @property
     def size(self) -> int:
@@ -325,19 +327,70 @@ class Dashboard(BaseModel):
     def __repr__(self) -> str:
         return f"<CloudWatchDashboard {self.name}>"
 
+    @staticmethod
+    def cloudformation_type() -> str:
+        return "AWS::CloudWatch::Dashboard"
+
+    @classmethod
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "Dashboard":
+        backend: CloudWatchBackend = cloudwatch_backends[account_id][region_name]
+        properties = cloudformation_json["Properties"]
+        name = properties.get("DashboardName") or str(uuid4())
+
+        return backend.put_dashboard(name=name, body=properties["DashboardBody"])
+
+    @classmethod
+    def update_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        original_resource: Any,
+        new_resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+    ) -> "Dashboard":
+        cls.delete_from_cloudformation_json(
+            original_resource.name, cloudformation_json, account_id, region_name
+        )
+        return cls.create_from_cloudformation_json(
+            new_resource_name, cloudformation_json, account_id, region_name
+        )
+
+    @classmethod
+    def delete_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+    ) -> None:
+        backend: CloudWatchBackend = cloudwatch_backends[account_id][region_name]
+
+        backend.delete_dashboards(dashboards=[resource_name])
+
+    @property
+    def physical_resource_id(self) -> str:
+        return self.name
+
 
 class Statistics:
     """
     Helper class to calculate statics for a list of metrics (MetricDatum, or MetricAggregatedDatum)
     """
 
-    def __init__(self, stats: List[str], dt: datetime, unit: Optional[str] = None):
-        self.timestamp: str = iso_8601_datetime_without_milliseconds(dt or utcnow())
-        self.metric_data: List[MetricDatumBase] = []
+    def __init__(self, stats: list[str], dt: datetime, unit: str | None = None):
+        self.timestamp: datetime = dt or utcnow()
+        self.metric_data: list[MetricDatumBase] = []
         self.stats = stats
         self.unit = unit
 
-    def get_statistics_for_type(self, stat: str) -> Optional[SupportsFloat]:
+    def get_statistics_for_type(self, stat: str) -> SupportsFloat | None:
         """Calculates the statistic for the metric_data provided
 
         :param stat: the statistic that should be returned, case-sensitive (Sum, Average, Minium, Maximum, SampleCount)
@@ -356,14 +409,14 @@ class Statistics:
         return None
 
     @property
-    def metric_single_values_list(self) -> List[float]:
+    def metric_single_values_list(self) -> list[float]:
         """
         :return: list of all values for the MetricDatum instances of the metric_data list
         """
         return [m.value for m in self.metric_data or [] if isinstance(m, MetricDatum)]
 
     @property
-    def metric_aggregated_list(self) -> List[MetricAggregatedDatum]:
+    def metric_aggregated_list(self) -> list[MetricAggregatedDatum]:
         """
         :return: list of all MetricAggregatedDatum instances from the metric_data list
         """
@@ -372,21 +425,21 @@ class Statistics:
         ]
 
     @property
-    def sample_count(self) -> Optional[SupportsFloat]:
+    def sample_count(self) -> SupportsFloat | None:
         if "SampleCount" not in self.stats:
             return None
 
         return self.calc_sample_count()
 
     @property
-    def sum(self) -> Optional[SupportsFloat]:
+    def sum(self) -> SupportsFloat | None:
         if "Sum" not in self.stats:
             return None
 
         return self.calc_sum()
 
     @property
-    def minimum(self) -> Optional[SupportsFloat]:
+    def minimum(self) -> SupportsFloat | None:
         if "Minimum" not in self.stats:
             return None
         if not self.metric_single_values_list and not self.metric_aggregated_list:
@@ -398,7 +451,7 @@ class Statistics:
         return min(metrics)
 
     @property
-    def maximum(self) -> Optional[SupportsFloat]:
+    def maximum(self) -> SupportsFloat | None:
         if "Maximum" not in self.stats:
             return None
 
@@ -411,7 +464,7 @@ class Statistics:
         return max(metrics)
 
     @property
-    def average(self) -> Optional[SupportsFloat]:
+    def average(self) -> SupportsFloat | None:
         if "Average" not in self.stats:
             return None
 
@@ -433,23 +486,49 @@ class Statistics:
         )
 
 
-class CloudWatchBackend(BaseBackend):
+class InsightRule(BaseModel):
+    def __init__(
+        self,
+        account_id: str,
+        region_name: str,
+        definition: str,
+        name: str,
+        state: str,
+        schema: str | None,
+        managed_rule: bool | None,
+    ):
+        self.definition = definition
+        self.name = name
+        self.schema = schema or '{"Name" : "CloudWatchLogRule", "Version" : 1}'
+        self.state = state
+        self.managed_rule = managed_rule or False
+        self.rule_arn = make_arn_for_rule(region_name, account_id, name)
+
+
+class CloudWatchBackend(BaseBackend, TaggableResourcesMixin):
+    SERVICE_NAMESPACE = "cloudwatch"
+
     def __init__(self, region_name: str, account_id: str):
         super().__init__(region_name, account_id)
-        self.alarms: Dict[str, FakeAlarm] = {}
-        self.dashboards: Dict[str, Dashboard] = {}
-        self.metric_data: List[MetricDatumBase] = []
-        self.paged_metric_data: Dict[str, List[MetricDatumBase]] = {}
+        self.alarms: dict[str, Alarm] = {}
+        self.dashboards: dict[str, Dashboard] = {}
+        self.metric_data: list[MetricDatumBase] = []
+        self.paged_metric_data: dict[str, list[MetricDatumBase]] = {}
+        self.insight_rules: dict[str, InsightRule] = {}
         self.tagger = TaggingService()
 
     @property
     # Retrieve a list of all OOTB metrics that are provided by metrics providers
     # Computed on the fly
-    def aws_metric_data(self) -> List[MetricDatumBase]:
+    def aws_metric_data(self) -> list[MetricDatumBase]:
         providers = CloudWatchMetricProvider.__subclasses__()
         md = []
         for provider in providers:
-            md.extend(provider.get_cloudwatch_metrics(self.account_id))
+            md.extend(
+                provider.get_cloudwatch_metrics(
+                    self.account_id, region=self.region_name
+                )
+            )
         return md
 
     def put_metric_alarm(
@@ -463,21 +542,21 @@ class CloudWatchBackend(BaseBackend):
         threshold: float,
         statistic: str,
         description: str,
-        dimensions: List[Dict[str, str]],
-        alarm_actions: List[str],
-        metric_data_queries: Optional[List[MetricDataQuery]] = None,
-        datapoints_to_alarm: Optional[int] = None,
-        extended_statistic: Optional[str] = None,
-        ok_actions: Optional[List[str]] = None,
-        insufficient_data_actions: Optional[List[str]] = None,
-        unit: Optional[str] = None,
+        dimensions: list[dict[str, str]],
+        alarm_actions: list[str],
+        metric_data_queries: list[MetricDataQuery] | None = None,
+        datapoints_to_alarm: int | None = None,
+        extended_statistic: str | None = None,
+        ok_actions: list[str] | None = None,
+        insufficient_data_actions: list[str] | None = None,
+        unit: str | None = None,
         actions_enabled: bool = True,
-        treat_missing_data: Optional[str] = None,
-        evaluate_low_sample_count_percentile: Optional[str] = None,
-        threshold_metric_id: Optional[str] = None,
-        rule: Optional[str] = None,
-        tags: Optional[List[Dict[str, str]]] = None,
-    ) -> FakeAlarm:
+        treat_missing_data: str | None = None,
+        evaluate_low_sample_count_percentile: str | None = None,
+        threshold_metric_id: str | None = None,
+        rule: str | None = None,
+        tags: list[dict[str, str]] | None = None,
+    ) -> Alarm:
         if extended_statistic and not extended_statistic.startswith("p"):
             raise InvalidParameterValue(
                 f"The value {extended_statistic} for parameter ExtendedStatistic is not supported."
@@ -491,7 +570,7 @@ class CloudWatchBackend(BaseBackend):
                 "Supported options for parameter EvaluateLowSampleCountPercentile are evaluate and ignore."
             )
 
-        alarm = FakeAlarm(
+        alarm = Alarm(
             account_id=self.account_id,
             region_name=self.region_name,
             name=name,
@@ -524,18 +603,18 @@ class CloudWatchBackend(BaseBackend):
 
         return alarm
 
-    def describe_alarms(self) -> Iterable[FakeAlarm]:
+    def describe_alarms(self) -> Iterable[Alarm]:
         return self.alarms.values()
 
     @staticmethod
-    def _list_element_starts_with(items: List[str], needle: str) -> bool:
+    def _list_element_starts_with(items: list[str], needle: str) -> bool:
         """True of any of the list elements starts with needle"""
         for item in items:
             if item.startswith(needle):
                 return True
         return False
 
-    def get_alarms_by_action_prefix(self, action_prefix: str) -> Iterable[FakeAlarm]:
+    def get_alarms_by_action_prefix(self, action_prefix: str) -> Iterable[Alarm]:
         return [
             alarm
             for alarm in self.alarms.values()
@@ -544,27 +623,35 @@ class CloudWatchBackend(BaseBackend):
             )
         ]
 
-    def get_alarms_by_alarm_name_prefix(self, name_prefix: str) -> Iterable[FakeAlarm]:
+    def get_alarms_by_alarm_name_prefix(self, name_prefix: str) -> Iterable[Alarm]:
         return [
             alarm
             for alarm in self.alarms.values()
             if alarm.name.startswith(name_prefix)
         ]
 
-    def get_alarms_by_alarm_names(self, alarm_names: List[str]) -> Iterable[FakeAlarm]:
+    def get_alarms_by_alarm_names(self, alarm_names: list[str]) -> Iterable[Alarm]:
         return [alarm for alarm in self.alarms.values() if alarm.name in alarm_names]
 
-    def get_alarms_by_state_value(self, target_state: str) -> Iterable[FakeAlarm]:
+    def get_alarms_by_state_value(self, target_state: str) -> Iterable[Alarm]:
         return filter(
             lambda alarm: alarm.state_value == target_state, self.alarms.values()
         )
 
-    def delete_alarms(self, alarm_names: List[str]) -> None:
+    def delete_alarms(self, alarm_names: list[str]) -> None:
         for alarm_name in alarm_names:
             self.alarms.pop(alarm_name, None)
 
+    def enable_alarm_actions(self, alarm_names: list[str]) -> None:
+        for alarm in self.get_alarms_by_alarm_names(alarm_names):
+            alarm.actions_enabled = True
+
+    def disable_alarm_actions(self, alarm_names: list[str]) -> None:
+        for alarm in self.get_alarms_by_alarm_names(alarm_names):
+            alarm.actions_enabled = False
+
     def put_metric_data(
-        self, namespace: str, metric_data: List[Dict[str, Any]]
+        self, namespace: str, metric_data: list[dict[str, Any]]
     ) -> None:
         for i, metric in enumerate(metric_data):
             self._validate_parameters_put_metric_data(metric, i + 1)
@@ -572,23 +659,18 @@ class CloudWatchBackend(BaseBackend):
         for metric_member in metric_data:
             # Preserve "datetime" for get_metric_statistics comparisons
             timestamp = metric_member.get("Timestamp")
-            if timestamp is not None and type(timestamp) != datetime:
-                timestamp = parser.parse(timestamp)
             metric_name = metric_member["MetricName"]
-            dimension = metric_member.get("Dimensions.member", _EMPTY_LIST)
+            dimension = metric_member.get("Dimensions", _EMPTY_LIST)
             unit = metric_member.get("Unit")
 
             # put_metric_data can include "value" as single value or "values" as a list
-            if metric_member.get("Values.member"):
-                values = metric_member["Values.member"]
+            if metric_member.get("Values"):
+                values = metric_member["Values"]
                 # value[i] should be added count[i] times (with default count 1)
-                counts = metric_member.get("Counts.member") or ["1"] * len(values)
+                counts = metric_member.get("Counts") or ["1"] * len(values)
                 for i in range(0, len(values)):
                     value = values[i]
                     timestamp = metric_member.get("Timestamp")
-                    if timestamp is not None and type(timestamp) != datetime:
-                        timestamp = parser.parse(timestamp)
-
                     # add the value count[i] times
                     for _ in range(0, int(float(counts[i]))):
                         self.metric_data.append(
@@ -631,11 +713,11 @@ class CloudWatchBackend(BaseBackend):
 
     def get_metric_data(
         self,
-        queries: List[Dict[str, Any]],
+        queries: list[dict[str, Any]],
         start_time: datetime,
         end_time: datetime,
         scan_by: str = "TimestampAscending",
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         start_time = start_time.replace(microsecond=0)
         end_time = end_time.replace(microsecond=0)
 
@@ -655,7 +737,16 @@ class CloudWatchBackend(BaseBackend):
         results = []
         results_to_return = []
         metric_stat_queries = [q for q in queries if "MetricStat" in q]
-        expression_queries = [q for q in queries if "Expression" in q]
+        metric_math_expression_queries = [
+            q
+            for q in queries
+            if "Expression" in q and not q["Expression"].startswith("SELECT")
+        ]
+        metric_insights_expression_queries = [
+            q
+            for q in queries
+            if "Expression" in q and q["Expression"].startswith("SELECT")
+        ]
         for query in metric_stat_queries:
             period_start_time = start_time
             metric_stat = query["MetricStat"]
@@ -667,8 +758,8 @@ class CloudWatchBackend(BaseBackend):
                 for d in metric_stat["Metric"].get("Dimensions", [])
             ]
             unit = metric_stat.get("Unit")
-            result_vals: List[SupportsFloat] = []
-            timestamps: List[str] = []
+            result_vals: list[SupportsFloat] = []
+            timestamps: list[datetime] = []
             stat = metric_stat["Stat"]
             while period_start_time <= end_time:
                 period_end_time = period_start_time + delta
@@ -713,30 +804,73 @@ class CloudWatchBackend(BaseBackend):
                 {
                     "id": query["Id"],
                     "label": label,
-                    "vals": result_vals,
+                    "values": result_vals,
                     "timestamps": timestamps,
+                    "status_code": "Complete",
                 }
             )
-            if query.get("ReturnData", "true") == "true":
+            if query.get("ReturnData", True):
                 results_to_return.append(
                     {
                         "id": query["Id"],
                         "label": label,
-                        "vals": result_vals,
+                        "values": result_vals,
                         "timestamps": timestamps,
+                        "status_code": "Complete",
                     }
                 )
-        for query in expression_queries:
-            label = query.get("Label") or f"{query_name} {stat}"
+        # Metric Math expression Queries run on top of the results of other queries
+        for query in metric_math_expression_queries:
+            label = query.get("Label") or query["Id"]
             result_vals, timestamps = parse_expression(query["Expression"], results)
             results_to_return.append(
                 {
                     "id": query["Id"],
                     "label": label,
-                    "vals": result_vals,
+                    "values": result_vals,
                     "timestamps": timestamps,
+                    "status_code": "Complete",
                 }
             )
+        # Metric Insights Expression Queries act on all results, and are essentially SQL queries
+        for query in metric_insights_expression_queries:
+            period_start_time = start_time
+            delta = timedelta(seconds=int(query["Period"]))
+            result_vals: list[SupportsFloat] = []  # type: ignore[no-redef]
+            timestamps: list[datetime] = []  # type: ignore[no-redef]
+            while period_start_time <= end_time:
+                period_end_time = period_start_time + delta
+                period_md = [
+                    period_md
+                    for period_md in period_data
+                    if period_start_time <= period_md.timestamp < period_end_time
+                ]
+
+                # https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/cloudwatch-metrics-insights-querylanguage.html
+                # We should filter even further, but Moto currently does not support Metrics Insights Queries
+                # Let's just add all metric data found within this period
+
+                if len(period_md) > 0:
+                    stats = Statistics(["Sum"], period_start_time)
+                    stats.metric_data = period_md
+                    result_vals.append(stats.get_statistics_for_type("Sum"))  # type: ignore[arg-type]
+
+                    timestamps.append(stats.timestamp)
+                period_start_time += delta
+            if scan_by == "TimestampDescending" and len(timestamps) > 0:
+                timestamps.reverse()
+                result_vals.reverse()
+
+            results_to_return.append(
+                {
+                    "id": query["Id"],
+                    "label": (query.get("Label") or query["Id"]),
+                    "values": result_vals,
+                    "timestamps": timestamps,
+                    "status_code": "Complete",
+                }
+            )
+
         return results_to_return
 
     def get_metric_statistics(
@@ -746,10 +880,10 @@ class CloudWatchBackend(BaseBackend):
         start_time: datetime,
         end_time: datetime,
         period: int,
-        stats: List[str],
-        dimensions: List[Dict[str, str]],
-        unit: Optional[str] = None,
-    ) -> List[Statistics]:
+        stats: list[str],
+        dimensions: list[dict[str, str]],
+        unit: str | None = None,
+    ) -> list[Statistics]:
         start_time = start_time.replace(microsecond=0)
         end_time = end_time.replace(microsecond=0)
 
@@ -780,7 +914,7 @@ class CloudWatchBackend(BaseBackend):
             return []
 
         idx = 0
-        data: List[Statistics] = list()
+        data: list[Statistics] = []
         for dt in daterange(
             filtered_data[0].timestamp,
             filtered_data[-1].timestamp + period_delta,
@@ -801,18 +935,19 @@ class CloudWatchBackend(BaseBackend):
 
         return data
 
-    def get_all_metrics(self) -> List[MetricDatumBase]:
+    def get_all_metrics(self) -> list[MetricDatumBase]:
         return self.metric_data + self.aws_metric_data
 
-    def put_dashboard(self, name: str, body: str) -> None:
-        self.dashboards[name] = Dashboard(self.account_id, name, body)
+    def put_dashboard(self, name: str, body: str) -> Dashboard:
+        self.dashboards[name] = Dashboard(self.account_id, self.region_name, name, body)
+        return self.dashboards[name]
 
     def list_dashboards(self, prefix: str = "") -> Iterable[Dashboard]:
         for key, value in self.dashboards.items():
             if key.startswith(prefix):
                 yield value
 
-    def delete_dashboards(self, dashboards: List[str]) -> Optional[str]:
+    def delete_dashboards(self, dashboards: list[str]) -> str | None:
         to_delete = set(dashboards)
         all_dashboards = set(self.dashboards.keys())
 
@@ -827,7 +962,7 @@ class CloudWatchBackend(BaseBackend):
 
         return None
 
-    def get_dashboard(self, dashboard: str) -> Optional[Dashboard]:
+    def get_dashboard(self, dashboard: str) -> Dashboard | None:
         return self.dashboards.get(dashboard)
 
     def set_alarm_state(
@@ -853,11 +988,11 @@ class CloudWatchBackend(BaseBackend):
 
     def list_metrics(
         self,
-        next_token: Optional[str],
+        next_token: str | None,
         namespace: str,
         metric_name: str,
-        dimensions: List[Dict[str, str]],
-    ) -> Tuple[Optional[str], List[MetricDatumBase]]:
+        dimensions: list[dict[str, str]],
+    ) -> tuple[str | None, list[MetricDatumBase]]:
         if next_token:
             if next_token not in self.paged_metric_data:
                 raise InvalidParameterValue("Request parameter NextToken is invalid")
@@ -870,10 +1005,10 @@ class CloudWatchBackend(BaseBackend):
             return self._get_paginated(metrics)
 
     def get_filtered_metrics(
-        self, metric_name: str, namespace: str, dimensions: List[Dict[str, str]]
-    ) -> List[MetricDatumBase]:
+        self, metric_name: str, namespace: str, dimensions: list[dict[str, str]]
+    ) -> list[MetricDatumBase]:
         metrics = self.get_all_metrics()
-        new_metrics: List[MetricDatumBase] = []
+        new_metrics: list[MetricDatumBase] = []
         for md in metrics:
             if md.filter(
                 namespace=namespace,
@@ -884,27 +1019,12 @@ class CloudWatchBackend(BaseBackend):
                 new_metrics.append(md)
         return new_metrics
 
-    def list_tags_for_resource(self, arn: str) -> Dict[str, str]:
+    def list_tags_for_resource(self, arn: str) -> dict[str, str]:
         return self.tagger.get_tag_dict_for_resource(arn)
 
-    def tag_resource(self, arn: str, tags: List[Dict[str, str]]) -> None:
-        # From boto3:
-        # Currently, the only CloudWatch resources that can be tagged are alarms and Contributor Insights rules.
-        all_arns = [alarm.alarm_arn for alarm in self.describe_alarms()]
-        if arn not in all_arns:
-            raise ResourceNotFoundException
-
-        self.tagger.tag_resource(arn, tags)
-
-    def untag_resource(self, arn: str, tag_keys: List[str]) -> None:
-        if arn not in self.tagger.tags.keys():
-            raise ResourceNotFoundException
-
-        self.tagger.untag_resource_using_names(arn, tag_keys)
-
     def _get_paginated(
-        self, metrics: List[MetricDatumBase]
-    ) -> Tuple[Optional[str], List[MetricDatumBase]]:
+        self, metrics: list[MetricDatumBase]
+    ) -> tuple[str | None, list[MetricDatumBase]]:
         if len(metrics) > 500:
             next_token = str(mock_random.uuid4())
             self.paged_metric_data[next_token] = metrics[500:]
@@ -913,7 +1033,7 @@ class CloudWatchBackend(BaseBackend):
             return None, metrics
 
     def _validate_parameters_put_metric_data(
-        self, metric: Dict[str, Any], query_num: int
+        self, metric: dict[str, Any], query_num: int
     ) -> None:
         """Runs some basic validation of the Metric Query
 
@@ -924,24 +1044,24 @@ class CloudWatchBackend(BaseBackend):
         :raises: InvalidParameterCombination
         """
         # basic validation of input
-        if metric.get("Value") == "NaN":
+        if math.isnan(metric.get("Value", 0.0)):
             # single value
             raise InvalidParameterValue(
                 f"The value NaN for parameter MetricData.member.{query_num}.Value is invalid."
             )
-        if metric.get("Values.member"):
+        if metric.get("Values"):
             # list of values
             if "Value" in metric:
                 raise InvalidParameterValue(
                     f"The parameters MetricData.member.{query_num}.Value and MetricData.member.{query_num}.Values are mutually exclusive and you have specified both."
                 )
-            if metric.get("Counts.member"):
-                if len(metric["Counts.member"]) != len(metric["Values.member"]):
+            if metric.get("Counts"):
+                if len(metric["Counts"]) != len(metric["Values"]):
                     raise InvalidParameterValue(
                         f"The parameters MetricData.member.{query_num}.Values and MetricData.member.{query_num}.Counts must be of the same size."
                     )
-            for value in metric["Values.member"]:
-                if value.lower() == "nan":
+            for value in metric["Values"]:
+                if math.isnan(value):
                     raise InvalidParameterValue(
                         f"The value {value} for parameter MetricData.member.{query_num}.Values is invalid."
                     )
@@ -959,6 +1079,131 @@ class CloudWatchBackend(BaseBackend):
                     raise InvalidParameterValue(
                         f'Missing required parameter in MetricData[{query_num}].StatisticValues: "{stat}"'
                     )
+
+    def put_insight_rule(
+        self,
+        name: str,
+        state: str,
+        definition: str,
+        tags: list[dict[str, str]] | None = None,
+    ) -> InsightRule:
+        rule = InsightRule(
+            account_id=self.account_id,
+            region_name=self.region_name,
+            definition=definition,
+            name=name,
+            state=state,
+            schema='{"Name" : "CloudWatchLogRule", "Version" : 1}',
+            managed_rule=False,
+        )
+        if tags:
+            self.tagger.tag_resource(rule.rule_arn, tags)
+
+        self.insight_rules[name] = rule
+
+        return rule
+
+    def describe_insight_rules(
+        self,
+        next_token: str | None = "",
+        max_results: int | None = 500,
+    ) -> list[InsightRule]:
+        rules = list(self.insight_rules.values())
+
+        if max_results is None or len(rules) <= max_results:
+            return rules
+
+        return rules[:max_results]
+
+    def delete_insight_rules(self, rule_names: list[str]) -> list[dict[str, Any]]:
+        failures = []
+        for rule_name in list(self.insight_rules.keys()):
+            if rule_name in rule_names:
+                rule = self.insight_rules.get(rule_name)
+                if rule and rule.managed_rule:
+                    failures.append(
+                        {
+                            "FailureResource": rule_name,
+                            "ExceptionType": "InvalidParameterValue",
+                            "FailureCode": 400,
+                            "FailureDescription": "The value of an input parameter is bad or out-of-range.",
+                        }
+                    )
+                else:
+                    del self.insight_rules[rule_name]
+
+        return failures
+
+    def disable_insight_rules(self, rule_names: list[str]) -> list[dict[str, Any]]:
+        failures = []
+        for rule_name in list(self.insight_rules.keys()):
+            if rule_name in rule_names:
+                rule = self.insight_rules.get(rule_name)
+                if rule and rule.managed_rule:
+                    failures.append(
+                        {
+                            "FailureResource": rule_name,
+                            "ExceptionType": "InvalidParameterValue",
+                            "FailureCode": 400,
+                            "FailureDescription": "The value of an input parameter is bad or out-of-range.",
+                        }
+                    )
+                else:
+                    self.insight_rules[rule_name].state = "DISABLED"
+
+        return failures
+
+    def enable_insight_rules(self, rule_names: list[str]) -> list[dict[str, Any]]:
+        failures = []
+        for rule_name in list(self.insight_rules.keys()):
+            if rule_name in rule_names:
+                rule = self.insight_rules.get(rule_name)
+                if rule and rule.managed_rule:
+                    failures.append(
+                        {
+                            "FailureResource": rule_name,
+                            "ExceptionType": "InvalidParameterValue",
+                            "FailureCode": 400,
+                            "FailureDescription": "The value of an input parameter is bad or out-of-range.",
+                        }
+                    )
+                else:
+                    self.insight_rules[rule_name].state = "ENABLED"
+
+        return failures
+
+    # Resource Groups Tagging API (TaggableResourcesMixin method overrides)
+    def iter_tagged_resources(self) -> Iterator[TaggedResource]:
+        partition = self.partition
+        for alarm in self.alarms.values():
+            arn = f"arn:{partition}:cloudwatch:{self.region_name}:{self.account_id}:alarm:{alarm.name}"
+            yield TaggedResource(
+                arn=arn,
+                tags=self.tagger.get_tag_dict_for_resource(arn),
+                resource_type="cloudwatch:alarm",
+            )
+        for rule in self.insight_rules.values():
+            arn = f"arn:{partition}:cloudwatch:{self.region_name}:{self.account_id}:insight-rule/{rule.name}"
+            yield TaggedResource(
+                arn=arn,
+                tags=self.tagger.get_tag_dict_for_resource(arn),
+                resource_type="cloudwatch:insight-rule",
+            )
+
+    def tag_resource(self, arn: str, tags: dict[str, str]) -> None:
+        # From boto3:
+        # Currently, the only CloudWatch resources that can be tagged are alarms and Contributor Insights rules.
+        all_arns = [alarm.alarm_arn for alarm in self.describe_alarms()]
+        if arn not in all_arns:
+            raise ResourceNotFoundException
+
+        self.tagger.tag_resource(arn, self.tagger.convert_dict_to_tags_input(tags))
+
+    def untag_resource(self, arn: str, tag_keys: list[str]) -> None:
+        if arn not in self.tagger.tags.keys():
+            raise ResourceNotFoundException
+
+        self.tagger.untag_resource_using_names(arn, tag_keys)
 
 
 cloudwatch_backends = BackendDict(CloudWatchBackend, "cloudwatch")

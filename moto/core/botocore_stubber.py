@@ -1,23 +1,24 @@
 import re
 from io import BytesIO
-from typing import Any, Optional, Union
+from typing import Any
 
 from botocore.awsrequest import AWSResponse
 
 import moto.backend_index as backend_index
 from moto.core.base_backend import BackendDict
 from moto.core.common_types import TYPE_RESPONSE
-from moto.core.config import passthrough_service, passthrough_url
+from moto.core.config import passthrough_service, passthrough_url, service_whitelisted
+from moto.core.exceptions import ServiceNotWhitelisted
 from moto.core.utils import get_equivalent_url_in_aws_domain
 
 
 class MockRawResponse(BytesIO):
-    def __init__(self, response_input: Union[str, bytes]):
+    def __init__(self, response_input: str | bytes):
         if isinstance(response_input, str):
             response_input = response_input.encode("utf-8")
         super().__init__(response_input)
 
-    def stream(self, **kwargs: Any) -> Any:  # pylint: disable=unused-argument
+    def stream(self, **kwargs: Any) -> Any:
         contents = self.read()
         while contents:
             yield contents
@@ -30,7 +31,7 @@ class BotocoreStubber:
 
     def __call__(
         self, event_name: str, request: Any, **kwargs: Any
-    ) -> Optional[AWSResponse]:
+    ) -> AWSResponse | None:
         if not self.enabled:
             return None
 
@@ -41,7 +42,7 @@ class BotocoreStubber:
         else:
             return response
 
-    def process_request(self, request: Any) -> Optional[TYPE_RESPONSE]:
+    def process_request(self, request: Any) -> TYPE_RESPONSE | None:
         # Handle non-standard AWS endpoint hostnames from ISO regions or custom
         # S3 endpoints.
         parsed_url, _ = get_equivalent_url_in_aws_domain(request.url)
@@ -56,6 +57,9 @@ class BotocoreStubber:
                 if passthrough_service(service):
                     return None
 
+                if not service_whitelisted(service):
+                    raise ServiceNotWhitelisted(service)
+
                 import moto.backends as backends
                 from moto.core import DEFAULT_ACCOUNT_ID
                 from moto.core.exceptions import HTTPException
@@ -67,7 +71,7 @@ class BotocoreStubber:
                     if "us-east-1" in backend_dict[DEFAULT_ACCOUNT_ID]:
                         backend = backend_dict[DEFAULT_ACCOUNT_ID]["us-east-1"]
                     else:
-                        backend = backend_dict[DEFAULT_ACCOUNT_ID]["global"]
+                        backend = backend_dict[DEFAULT_ACCOUNT_ID]["aws"]
                 else:
                     backend = backend_dict["global"]
 

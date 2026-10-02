@@ -20,8 +20,8 @@ kinesisvideo
 - [ ] delete_signaling_channel
 - [X] delete_stream
   
-        The CurrentVersion-parameter is not yet implemented
-        
+The CurrentVersion-parameter is not yet implemented
+
 
 - [ ] describe_edge_configuration
 - [ ] describe_image_generation_configuration
@@ -30,14 +30,15 @@ kinesisvideo
 - [ ] describe_notification_configuration
 - [ ] describe_signaling_channel
 - [X] describe_stream
+- [ ] describe_stream_storage_configuration
 - [X] get_data_endpoint
 - [ ] get_signaling_channel_endpoint
 - [ ] list_edge_agent_configurations
 - [ ] list_signaling_channels
 - [X] list_streams
   
-        Pagination and the StreamNameCondition-parameter are not yet implemented
-        
+Pagination and the StreamNameCondition-parameter are not yet implemented
+
 
 - [ ] list_tags_for_resource
 - [ ] list_tags_for_stream
@@ -52,4 +53,5 @@ kinesisvideo
 - [ ] update_notification_configuration
 - [ ] update_signaling_channel
 - [ ] update_stream
+- [ ] update_stream_storage_configuration
 
